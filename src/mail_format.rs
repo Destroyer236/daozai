@@ -31,7 +31,13 @@ pub struct Line {
 /// 避免营销邮件只剩一片空白。两者都按「实际文字量」择优。
 pub fn lines(html: &str, text: &str) -> Vec<Line> {
     let html = clean(html);
-    let text = clean(text);
+    // 有些服务商的纯文本部分直接是 HTML 源码（新浪等）；没有 HTML 正文时按 HTML 拆，
+    // 否则阅读窗口会把 <table width="600"> 原样铺出来。
+    let text = if html.trim().is_empty() && mail::looks_like_html(text) {
+        std::borrow::Cow::Owned(crate::otp::html_to_text(text))
+    } else {
+        clean(text)
+    };
     let plain = if text.trim().is_empty() { Vec::new() } else { from_text(&text) };
     let rich = if html.trim().is_empty() { Vec::new() } else { from_html(&html) };
     let score = |v: &[Line]| -> usize {
@@ -380,6 +386,18 @@ mod tests {
         let decoded=decode(&text);
         assert!(start.elapsed()<std::time::Duration::from_secs(2));
         assert_eq!(decoded,format!("{}中文{}&","&".repeat(250_000),'\u{10ffff}'));
+    }
+
+    #[test]
+    fn plain_part_that_is_html_source_is_laid_out_as_text() {
+        let body = "<table width=\"600\" bgcolor=\"#E5E5E5\"><tbody><tr><td><p>您的邮箱服务就要到期了</p></td></tr></tbody></table>";
+        let out = lines("", body);
+        let text: String = out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(!text.contains('<') && !text.contains("width="), "标签不能出现在正文：{text}");
+        assert!(text.contains("您的邮箱服务就要到期了"));
+        // 普通正文里的尖括号保持原样。
+        let out = lines("", "if a<b then");
+        assert_eq!(out[0].text, "if a<b then");
     }
 
     #[test]

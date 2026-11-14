@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度", "天气"];
+        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度", "天气", "验证器"];
         for (tab, expected) in groups.iter().enumerate() {
             let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,start,end)| (*start..=*end).contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
@@ -1088,7 +1088,7 @@ pub(crate) fn settings_card(ui:&mut egui::Ui,add:impl FnOnce(&mut egui::Ui)) {
 /// 设置分页对应的功能模块（页面序号）；常规、通知、关于、页面管理不属于任何模块。
 pub(crate) fn settings_tab_module(tab:usize)->Option<usize>{
     use crate::app::*;
-    match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),12=>Some(WEATHER_PAGE),_=>None}
+    match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),12=>Some(WEATHER_PAGE),13=>Some(TWOFA_PAGE),_=>None}
 }
 
 pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
@@ -1209,14 +1209,12 @@ fn time_stepper(ui:&mut egui::Ui,value:&mut u32,id:&str)->bool{
     });
     changed
 }
-fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],unit:&str){
-    let labels=values.map(|v|format!("{v} {unit}"));
-    let options:Vec<(u32,&str)>=values.iter().zip(labels.iter()).map(|(v,l)|(*v,l.as_str())).collect();
-    settings_control_row_right(ui,title,|ui|{settings_segmented(ui,value,&options,62.0);});
+fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,options:&[(u32,&str)]){
+    settings_control_row_right(ui,title,|ui|{settings_segmented(ui,value,options,62.0);});
 }
-const SETTINGS_GROUPS: [(&str,usize,usize);9] = [
+const SETTINGS_GROUPS: [(&str,usize,usize);10] = [
     ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3),
-    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("天气",12,12), ("关于",9,9),
+    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("天气",12,12), ("验证器",13,13), ("关于",9,9),
 ];
 
 impl App {
@@ -1269,6 +1267,7 @@ impl App {
                         4=>egui::include_image!("../assets/settings-icons/system/tasks.svg"),
                         6=>egui::include_image!("../assets/settings-icons/system/notifications.svg"),
                         12=>egui::include_image!("../assets/settings-icons/system/weather.svg"),
+                        13=>egui::include_image!("../assets/settings-icons/system/twofa.svg"),
                         _=>egui::include_image!("../assets/settings-icons/system/about.svg"),
                     };
                     let icon_bg=egui::Rect::from_center_size(egui::pos2(rect.left()+21.0,rect.center().y),egui::vec2(25.0,25.0));
@@ -1299,8 +1298,8 @@ impl App {
                     }
                 }
                 ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
-                let titles=["常规","音乐与歌词","专注","健康提醒","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","天气"];
-                ui.label(egui::RichText::new(titles[self.settings_tab.min(12)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                let titles=["常规","音乐与歌词","专注","健康提醒","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","天气","验证器"];
+                ui.label(egui::RichText::new(titles[self.settings_tab.min(13)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
                 if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
                     if start!=end {
                         ui.add_space(7.0);
@@ -1336,6 +1335,7 @@ impl App {
                         if !self.module_on(page) {ui.disable();}
                     }
                     match self.settings_tab {
+                    13=>self.twofa_settings(ui),
                     12=>self.weather_settings(ui),
                     11=>self.quota_settings(ui),
                     10=>{
@@ -1350,7 +1350,7 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝水与久坐提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","当地天气与七日预报"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝水与久坐提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","当地天气与七日预报","两步验证动态码，点击复制"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序；关闭的功能不在后台运行，不同步也不提醒，已有数据保留。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -1690,12 +1690,12 @@ impl App {
                             ui.separator();
                             setting_row(ui,"验证码高亮","识别到验证码时在岛上放大显示，点击即复制",&mut self.settings.mail_code);
                             ui.separator();
-                            setting_choices(ui,"验证码隐藏",&mut self.settings.mail_code_hide_seconds,[30,60,300],"秒");
+                            setting_choices(ui,"验证码隐藏",&mut self.settings.mail_code_hide_seconds,&[(30,"30 秒"),(60,"60 秒"),(300,"300 秒")]);
                             ui.label("默认 60 秒。明确有效时长更短时提前隐藏；历史邮件默认隐藏。隐藏不代表失效，主动查看后 15 秒再次隐藏。");
-                            setting_choices(ui,"检查间隔",&mut self.settings.mail_interval,[60,120,300],"秒");
-                            ui.label(egui::RichText::new("支持推送时实时收信，并每 10 秒补查；以上间隔仅用于不支持推送的邮箱。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
+                            setting_choices(ui,"检查间隔",&mut self.settings.mail_interval,&[(10,"实时"),(60,"60 秒"),(120,"120 秒"),(300,"300 秒")]);
+                            ui.label(egui::RichText::new("支持推送时实时收信，并每 10 秒补查；「实时」对不支持推送的邮箱每 10 秒检查一次，可能受服务商限流。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
                             ui.separator();
-                            setting_choices(ui,"会议提前",&mut self.settings.mail_ics,[5,15,30],"分钟");
+                            setting_choices(ui,"会议提前",&mut self.settings.mail_ics,&[(5,"5 分钟"),(15,"15 分钟"),(30,"30 分钟")]);
                             ui.label(egui::RichText::new("根据邮件中的日历邀请提醒，与日程设置共用。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
                         });
                         settings_label(ui,"已添加的邮箱");
@@ -1708,7 +1708,14 @@ impl App {
                                 let status=self.mail.status_of(&email).label();
                                 let mut on=self.mail.accounts[i].enabled;
                                 if i>0{ui.separator();}
-                                ui.label(egui::RichText::new(&email).size(13.0).color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                                // 点邮箱地址即复制：地址是这行里最常被拿走的内容，不额外挤一个按钮。
+                                let copy_id=ui.make_persistent_id(("mail-email-copy",i));
+                                let copied=ui.data(|d|d.get_temp::<f64>(copy_id)).is_some_and(|at|self.t-at<1.6);
+                                let text=if copied{"已复制".to_string()}else{email.clone()};
+                                let color=if copied{settings_color(ctx,Color32::from_rgb(120,215,170),Color32::from_rgb(24,120,80))}else{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))};
+                                let row=ui.add(egui::Label::new(egui::RichText::new(text).size(13.0).color(color)).sense(egui::Sense::click())).on_hover_text("点击复制邮箱地址");
+                                if row.hovered(){ctx.set_cursor_icon(egui::CursorIcon::PointingHand);}
+                                if row.clicked(){self.pending.push(Cmd::Copy(email.clone()));ui.data_mut(|d|d.insert_temp(copy_id,self.t));ctx.request_repaint_after(std::time::Duration::from_millis(400));}
                                 ui.label(egui::RichText::new(format!("{} · {}",provider.label(),status)).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                                 ui.horizontal(|ui|{
                                     if ui.add_sized([66.0,30.0],egui::Button::new("测试")).clicked(){test=Some(i);}
@@ -1717,6 +1724,39 @@ impl App {
                                     ui.label(egui::RichText::new("启用").size(12.0).color(settings_color(ctx,Color32::from_gray(190),Color32::from_gray(65))));
                                     if switch(ui,&mut on){self.mail.accounts[i].enabled=on;changed=true;}
                                 });
+                            }
+                            // 导出含明文授权码，先让用户确认一步，再写文件并定位到资源管理器。
+                            if !self.mail.accounts.is_empty(){
+                                ui.separator();
+                                let confirm_id=ui.make_persistent_id("mail-export-confirm");
+                                let result_id=ui.make_persistent_id("mail-export-result");
+                                let confirming=ui.data(|d|d.get_temp::<bool>(confirm_id)).unwrap_or(false);
+                                if !confirming{
+                                    ui.horizontal_wrapped(|ui|{
+                                        if ui.button("导出邮箱与授权码").clicked(){ui.data_mut(|d|d.insert_temp(confirm_id,true));}
+                                        ui.label(egui::RichText::new("导出为文本文件，保存在数据目录的 exports 文件夹").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
+                                    });
+                                }else{
+                                    ui.label(egui::RichText::new(format!("将把 {} 个邮箱的授权码以明文写入本机文件，确认导出？",self.mail.accounts.len())).size(12.0).color(settings_color(ctx,Color32::from_rgb(235,180,90),Color32::from_rgb(150,90,20))));
+                                    ui.horizontal(|ui|{
+                                        if ui.button("确认导出").clicked(){
+                                            let report=crate::mail::export(&self.mail.accounts);
+                                            ui.data_mut(|d|d.insert_temp(confirm_id,false));
+                                            match report{
+                                                Ok(export)=>{
+                                                    let missing=if export.missing>0{format!("，{} 个未取到授权码",export.missing)}else{String::new()};
+                                                    ui.data_mut(|d|d.insert_temp(result_id,(format!("已导出 {} 个邮箱{missing}：{}",export.accounts,export.path.display()),self.t)));
+                                                    self.pending.push(Cmd::Reveal(export.path));
+                                                }
+                                                Err(error)=>{ui.data_mut(|d|d.insert_temp(result_id,(format!("导出失败：{error}"),self.t)));}
+                                            }
+                                        }
+                                        if ui.button("取消").clicked(){ui.data_mut(|d|d.insert_temp(confirm_id,false));}
+                                    });
+                                }
+                                if let Some((text,at))=ui.data(|d|d.get_temp::<(String,f64)>(result_id)).filter(|(_,at)|self.t-*at<10.0){
+                                    ui.label(egui::RichText::new(text).size(11.5).color(settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55))));
+                                }
                             }
                             if changed{self.mail_accounts_changed();}
                             if let Some(i)=remove{

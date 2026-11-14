@@ -20,7 +20,7 @@ fn strong() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
         Regex::new(concat!(
-            r"(?i)[验驗][证證][码碼]|校[验驗][码碼]|[确確][认認][码碼]|[动動][态態](?:密)?[码碼]|安全[码碼]|登[录錄入][码碼]|激活[码碼]|",
+            r"(?i)[验驗][证證](?:代)?[码碼]|校[验驗](?:代)?[码碼]|[确確][认認](?:代)?[码碼]|[动動][态態](?:密)?[码碼]|安全(?:代)?[码碼]|登[录錄入](?:代)?[码碼]|激活(?:代)?[码碼]|",
             r"一次性(?:密[码碼]|口令)|otp|one[-\s]?time\s+(?:code|password|passcode)|",
             r"verification\s+code|security\s+code|auth(?:entication)?\s+code|",
             r"passcode|\bcode\b|認証コード|인증번호"
@@ -477,6 +477,33 @@ mod tests {
         assert_eq!(code("", "验证码 906213"), Some("906213".into()));
         assert_eq!(code("", "安全码：4021"), Some("4021".into()));
         assert_eq!(code("", "验证码\n735164\n请勿泄露"), Some("735164".into()));
+    }
+
+    #[test]
+    fn security_code_label_with_dai_is_recognized() {
+        // Microsoft 帐户邮件用「安全代码」「安全代碼」，旧词表只认「安全码」，中间多一个「代」就漏识别。
+        let body = concat!(
+            "安全代码\n",
+            "请对个人 Microsoft 帐户 wi**0@outlook.com 使用以下安全代码。\n",
+            "安全代码：951202\n",
+            "如果你无法识别个人 Microsoft 帐户，可单击此处，从该帐户删除你的电子邮件地址。\n",
+            "谢谢！\nMicrosoft 帐户团队"
+        );
+        assert_eq!(code("Microsoft 帐户安全代码", body), Some("951202".into()));
+        assert_eq!(code("", body), Some("951202".into()));
+        for text in ["安全代碼：951202", "安全码 951202", "安全代码为 951202", "您的安全代码是：951202"] {
+            assert_eq!(code("", text), Some("951202".into()), "{text}");
+        }
+        // 提到「安全」或「安全代码」但没有可确认的码时，不能凭空挑一个数字。
+        for text in [
+            "安全提示：请勿向任何人泄露账户信息",
+            "安全代码将通过邮件发送",
+            "安全代码：请查看邮箱",
+            "安全设置已更新，编号 12345678",
+            "安全代码：请使用参考编号 951202",
+        ] {
+            assert_eq!(code("", text), None, "{text}");
+        }
     }
 
     #[test]

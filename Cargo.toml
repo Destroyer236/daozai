@@ -45,6 +45,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 raw-window-handle = "0.6"
 # v0.5.5 邮件：MIME 解析与验证码打分是纯逻辑，保持跨平台。
 mailparse = "0.18"
+encoding_rs = "0.8"
 regex = "1"
 url = "2"
 chrono = "0.4"

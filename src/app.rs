@@ -37,8 +37,11 @@ pub const MAIL_PAGE: usize = 5;
 pub const QUOTA_PAGE: usize = 6;
 pub const CALENDAR_PAGE: usize = 7;
 pub const WEATHER_PAGE: usize = 8;
+/// v0.6.64：两步验证（TOTP）动态码页。
+pub const TWOFA_PAGE: usize = 9;
 pub(crate) const WEATHER_H: f32 = 232.0;
 pub(crate) const CALENDAR_H: f32 = 216.0;
+pub(crate) const TWOFA_H: f32 = 196.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
 pub(crate) const HUD_W: f32 = 260.0;
@@ -64,8 +67,8 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "健康", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气"];
-pub(crate) const PAGE_SETTINGS_TABS: [usize; 9] = [1,2,3,5,4,7,11,8,12];
+pub(crate) const PAGE_NAMES: [&str; 10] = ["音乐", "专注", "健康", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气", "验证器"];
+pub(crate) const PAGE_SETTINGS_TABS: [usize; 10] = [1,2,3,5,4,7,11,8,12,13];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -516,6 +519,17 @@ pub(crate) struct MailForm {
     pub show: bool,
 }
 
+/// 验证器设置里的手动添加表单；`uri` 用于粘贴 otpauth 链接，`note` 显示上一次的结果。
+#[derive(Default)]
+pub(crate) struct TwofaForm {
+    pub issuer: String,
+    pub label: String,
+    pub secret: String,
+    pub uri: String,
+    pub note: String,
+    pub show_secret: bool,
+}
+
 impl MailState {
     /// 最近一封带验证码的邮件。
     pub fn code_item(&self) -> Option<&mail::Item> {self.recent.iter().find(|m|m.code.is_some())}
@@ -655,7 +669,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 9],
+    dots: [Spring; 10],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -793,6 +807,12 @@ pub struct App {
     pub(crate) quota: crate::quota_ui::State,
     /// 天气页的当前数据与后台拉取状态。
     pub(crate) weather: crate::weather::State,
+    /// 两步验证：账号清单与密钥缓存（密钥来自 Windows 凭据管理器）。
+    pub(crate) twofa: crate::twofa::Vault,
+    /// 验证器设置里的添加表单。
+    pub(crate) twofa_form: TwofaForm,
+    /// 验证器页的取码时刻；`None` 用真实时钟，测试里固定它来逐帧比对进度条。
+    pub(crate) twofa_clock: Option<f64>,
     pub(crate) updates: crate::updates::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
@@ -816,6 +836,7 @@ impl App {
         let initial_lyrics=settings.lyrics_enabled;
         let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
         let weather=crate::weather::State::load(&settings.weather_city,settings.weather_position.as_ref());
+        let twofa=crate::twofa::Vault::load();
         Self {
             opts,
             render_compat_running: settings.render_compat,
@@ -914,6 +935,9 @@ impl App {
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             weather,
+            twofa,
+            twofa_form: TwofaForm::default(),
+            twofa_clock: None,
             updates: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
@@ -1662,7 +1686,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==WEATHER_PAGE {WEATHER_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==WEATHER_PAGE {WEATHER_H}else if self.page==TWOFA_PAGE {TWOFA_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -2083,9 +2107,13 @@ impl App {
         let ambient=self.settings.skin==model::Skin::Fluid && self.fluid.animating() || self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
             || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
             || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some());
+        let pet_visible=self.pet_a>0.01 && !self.open && !minimal_pill;
+        // 验证器页：动态码与进度条都按真实时钟算，需要 60fps 重绘，
+        // 切换窗口的时刻才不会被一帧 33ms 的节奏拖后。
+        let twofa_ticking=self.open && self.page==TWOFA_PAGE && !self.twofa.accounts.is_empty();
         let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping;
         // 交互形变保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。
-        let repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
+        let repaint_after=std::time::Duration::from_secs_f64(if twofa_ticking{1.0/60.0}else if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
         cmds.append(&mut self.pending);
         FrameOut {
             region: rel(floating_toast.into_iter().chain(self.shelf_menu_rect.map(|r|r.union(r + ctx.style().visuals.popup_shadow.margin()).expand(1.0 / ctx.pixels_per_point()))).fold(region,Rect::union).intersect(ui.max_rect())),
@@ -2796,6 +2824,7 @@ impl App {
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
+            TWOFA_PAGE => ("两步", "验证", theme::CYAN),
             8 if self.weather.solar_open => ("日出", "日落", theme::YELLOW),
             8 => ("当地", "天气", theme::CYAN),
             _ => ("岛仔", "设置", theme::WHITE),
@@ -2856,6 +2885,7 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             8 => self.page_weather(c,env,cmds),
+            TWOFA_PAGE => self.page_twofa(c,env,cmds),
             CALENDAR_PAGE => self.page_calendar(c,env),
             _ => self.page_settings(c),
         }

@@ -4,7 +4,7 @@
 //! 不引 Node/Go/Electron。凭据一律进 Windows 凭据管理器（`keyring`），
 //! 账号清单只存「邮箱 + 类型 + 是否监控」，不存密码。
 //!
-//! 收信优先 `Session::idle()` 长连接；服务器不支持 IDLE 时退回轮询（60/120/300 秒）。
+//! 收信优先 `Session::idle()` 长连接；服务器不支持 IDLE 时退回轮询（实时 10 / 60 / 120 / 300 秒）。
 //! 正文只在内存里解析，不落盘、不缓存。
 
 use std::collections::HashMap;
@@ -177,6 +177,62 @@ impl Account {
         let digest=ring::digest::digest(&ring::digest::SHA256,identity.as_bytes());
         format!("custom-{}",digest.as_ref().iter().map(|b|format!("{b:02x}")).collect::<String>())
     }
+}
+
+/// 一键导出的结果：文件位置、账号数量、以及本机没有授权码的数量。
+pub struct Export { pub path: std::path::PathBuf, pub accounts: usize, pub missing: usize }
+
+fn cell(value: &str) -> String {
+    value.chars().map(|c| if matches!(c, '\t' | '\r' | '\n') { ' ' } else { c }).collect()
+}
+
+/// 导出文本（制表符分隔，带表头说明）。`codes` 与 `accounts` 一一对应，Err 表示本机取不到授权码。
+pub fn export_text(accounts: &[Account], codes: &[Result<String, String>], at: &str) -> String {
+    let missing = codes.iter().filter(|code| code.is_err()).count();
+    let mut out = format!(
+        "岛仔邮箱账号导出\n时间：{at}\n账号：{} 个（其中 {missing} 个本机没有保存授权码）\n\n\
+         注意：本文件含邮箱授权码明文，等同密码。只用于本机备份或迁移，不要上传网盘、发到聊天或截图分享；用完建议删除。\n\n\
+         邮箱\t类型\tIMAP 服务器\t端口\t登录名\t授权码\t启用\n",
+        accounts.len()
+    );
+    for (account, code) in accounts.iter().zip(codes) {
+        let (host, port, login) = match account.endpoint() {
+            Ok((host, port, user)) => (host, port.to_string(), user),
+            Err(_) => (String::new(), String::new(), String::new()),
+        };
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            cell(&account.email),
+            account.provider.label(),
+            cell(&host),
+            port,
+            cell(&login),
+            code.as_deref().map(cell).unwrap_or_default(),
+            if account.enabled { "是" } else { "否" }
+        ));
+    }
+    out
+}
+
+/// 把全部邮箱与授权码写进数据目录的 `exports` 文件夹；返回文件位置供界面定位。
+pub fn export(accounts: &[Account]) -> Result<Export, String> {
+    if accounts.is_empty() { return Err("还没有可导出的邮箱".into()); }
+    let codes: Vec<Result<String, String>> = accounts.iter().map(|account| secrets::load(&account.credential_key())).collect();
+    let at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    let body = export_text(accounts, &codes, &at);
+    let dir = crate::model::config_dir().join("exports");
+    std::fs::create_dir_all(&dir).map_err(|_| "无法创建导出目录".to_string())?;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut path = dir.join(format!("mail-accounts-{stamp}.txt"));
+    let mut copy = 2;
+    while path.exists() {
+        path = dir.join(format!("mail-accounts-{stamp}-{copy}.txt"));
+        copy += 1;
+    }
+    // BOM 让 Excel 直接按 UTF-8 打开中文表头。
+    let body = format!("\u{feff}{body}");
+    crate::model::atomic_write(&path, body.as_bytes()).map_err(|_| "无法写入导出文件".to_string())?;
+    Ok(Export { path, accounts: accounts.len(), missing: codes.iter().filter(|code| code.is_err()).count() })
 }
 
 pub fn key(account: &Account) -> String {
@@ -363,8 +419,36 @@ pub struct Parsed {
     pub emphasized: Vec<String>,
 }
 
-fn header(mail: &mailparse::ParsedMail, name: &str) -> String {
-    mail.headers
+/// 按声明的 charset 解码正文。
+///
+/// 只看声明不够：新浪等邮件常不写 charset（mailparse 就退回 Latin-1，UTF-8 中文会变成
+/// `å¼å…`），也有声明 gb2312 但正文其实是 UTF-8 的。这里以「解码失败」为信号重新判断：
+/// 声明可用且没有坏字节就用它；否则先试 UTF-8，再退回 GB18030（覆盖 gb2312/gbk）。
+fn decode_body(raw: &[u8], charset: &str) -> String {
+    let label = charset.trim().to_ascii_lowercase();
+    let declared = !matches!(label.as_str(), "" | "us-ascii" | "ascii" | "unknown-8bit" | "x-unknown" | "none");
+    if declared {
+        if let Some(encoding) = encoding_rs::Encoding::for_label(label.as_bytes()) {
+            let (text, had_errors) = encoding.decode_without_bom_handling(raw);
+            if !had_errors || std::str::from_utf8(raw).is_err() {
+                return text.into_owned();
+            }
+        }
+    }
+    if let Ok(text) = std::str::from_utf8(raw) {
+        return text.to_string();
+    }
+    let (text, _) = encoding_rs::GB18030.decode_without_bom_handling(raw);
+    text.into_owned()
+}
+
+/// 正文按声明字符集解码后的文本；解不出来时退回原始字节。
+fn part_text(mail: &mailparse::ParsedMail) -> Option<String> {
+    let raw = mail.get_body_raw().ok()?;
+    Some(decode_body(&raw, &mail.ctype.charset))
+}
+
+fn header(mail: &mailparse::ParsedMail, name: &str) -> String {    mail.headers
         .iter()
         .find(|h| h.get_key().eq_ignore_ascii_case(name))
         .map(|h| h.get_value().trim().to_string())
@@ -387,17 +471,17 @@ fn collect(mail: &mailparse::ParsedMail, plain: &mut String, html: &mut String, 
     if mail.subparts.is_empty() {
         let ct = mail.ctype.mimetype.to_ascii_lowercase();
         if ct == "text/plain" {
-            if let Ok(body) = mail.get_body() {
+            if let Some(body) = part_text(mail) {
                 plain.push_str(&body);
                 plain.push('\n');
             }
         } else if ct == "text/html" {
-            if let Ok(body) = mail.get_body() {
+            if let Some(body) = part_text(mail) {
                 html.push_str(&body);
                 html.push('\n');
             }
         } else if ct == "text/calendar" || ct == "application/ics" {
-            if let Ok(body) = mail.get_body() {
+            if let Some(body) = part_text(mail) {
                 calendar.push_str(&body);
                 calendar.push('\n');
             }
@@ -407,6 +491,23 @@ fn collect(mail: &mailparse::ParsedMail, plain: &mut String, html: &mut String, 
             collect(part, plain, html, calendar);
         }
     }
+}
+
+/// 有些服务商（新浪等）的 `text/plain` 部分里直接塞 HTML 源码；
+/// 这种正文必须按 HTML 处理，否则阅读界面会把 `<table width="600">` 原样显示出来。
+pub(crate) fn looks_like_html(text: &str) -> bool {    let t = text.trim_start();
+    let Some(rest) = t.strip_prefix('<') else { return false };
+    let tag = rest
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '!')
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('!')
+        .to_ascii_lowercase();
+    const TAGS: [&str; 17] = [
+        "html", "body", "table", "div", "p", "span", "style", "meta", "center", "tbody", "tr", "td",
+        "br", "h1", "h2", "font", "doctype",
+    ];
+    TAGS.contains(&tag.as_str()) && t.contains('>')
 }
 
 /// 解析一封原始邮件（头部 + 正文），只保留界面上要用的字段。
@@ -425,6 +526,13 @@ pub fn parse_message(raw: &[u8]) -> Parsed {
     let from = display_addr(&header(&mail, "From"));
     let (mut plain, mut html, mut calendar) = (String::new(), String::new(), String::new());
     collect(&mail, &mut plain, &mut html, &mut calendar);
+    // text/plain 里发现 HTML 源码：按 HTML 正文使用，并清掉纯文本，避免标签漏到界面。
+    if looks_like_html(&plain) {
+        if html.trim().is_empty() {
+            html = plain;
+        }
+        plain = String::new();
+    }
     let emphasized = if plain.trim().is_empty() {
         otp::emphasized(&html)
     } else {
@@ -839,7 +947,7 @@ mod service {
         while let Ok(cmd) = cmd_rx.recv() {
             match cmd {
                 Cmd::Sync(accounts, secs) => {
-                    interval.store(secs.clamp(30, 900) as u64, Ordering::Relaxed);
+                    interval.store(poll_seconds(secs), Ordering::Relaxed);
                     let wanted: HashMap<String, Account> = accounts
                         .into_iter()
                         .filter(|a| a.enabled)
@@ -895,6 +1003,12 @@ mod service {
 
     fn sleep_stop(stop: &AtomicBool, secs: u64) -> bool {
         sleep_until_stop(stop,Instant::now()+Duration::from_secs(secs))
+    }
+
+    /// 不支持推送时的轮询间隔：界面提供「实时」10 秒与 60/120/300 秒，
+    /// 手改配置的越界值收进 10..=900，既保留实时档也不至于把邮箱拖垮。
+    fn poll_seconds(secs: u32) -> u64 {
+        secs.clamp(10, 900) as u64
     }
 
     fn sleep_until_stop(stop:&AtomicBool,deadline:Instant)->bool{
@@ -1219,6 +1333,42 @@ mod service {
             assert_eq!(next_retry_delay(30,&mut failures),30);
             assert_eq!(next_retry_delay(30,&mut failures),60);
             assert_eq!(next_retry_delay(60,&mut failures),60);
+        }
+
+        #[test]
+        fn realtime_poll_interval_is_ten_seconds_and_stays_bounded() {
+            assert_eq!(poll_seconds(10),10,"「实时」档必须按 10 秒轮询，不能被下限抬走");
+            assert_eq!((poll_seconds(60),poll_seconds(120),poll_seconds(300)),(60,120,300));
+            assert_eq!(poll_seconds(0),10);
+            assert_eq!(poll_seconds(1),10);
+            assert_eq!(poll_seconds(5000),900);
+        }
+
+        #[test]
+        fn exported_accounts_text_lists_endpoint_and_missing_count() {
+            let accounts=vec![
+                Account{email:"a@example.com".into(),provider:Provider::Mail126,custom:None,enabled:true},
+                Account{email:"b@example.com".into(),provider:Provider::Custom,custom:Some(CustomImap{host:"imap.example.com".into(),port:993,username:"b-user".into()}),enabled:false},
+            ];
+            let codes=vec![Ok("abcd1234".to_string()),Err("没有保存授权码".to_string())];
+            let text=export_text(&accounts,&codes,"2026-11-13 21:50");
+            assert!(text.starts_with("岛仔邮箱账号导出\n时间：2026-11-13 21:50\n账号：2 个（其中 1 个本机没有保存授权码）"),"表头应写明导出时间与缺码数量");
+            assert!(text.contains("本文件含邮箱授权码明文"),"导出前要警告这是明文凭据");
+            assert!(text.contains("邮箱\t类型\tIMAP 服务器\t端口\t登录名\t授权码\t启用"));
+            assert!(text.contains("a@example.com\t126 邮箱\timap.126.com\t993\ta@example.com\tabcd1234\t是"));
+            assert!(text.contains("b@example.com\t自定义 IMAP\timap.example.com\t993\tb-user\t\t否"),"缺码的账号保留空授权码列，不写入错误信息");
+        }
+
+        #[test]
+        fn export_cells_cannot_break_the_columns() {
+            let accounts=vec![
+                Account{email:"a\tb@example.com".into(),provider:Provider::Custom,custom:Some(CustomImap{host:"imap.example.com".into(),port:993,username:"user\nname".into()}),enabled:true},
+            ];
+            let codes=vec![Ok("code\twith\ttabs".to_string())];
+            let text=export_text(&accounts,&codes,"2026-11-13 21:50");
+            let row=text.lines().last().unwrap();
+            assert_eq!(row.split('\t').count(),7,"邮箱或授权码里的制表符不能撑出多余的列");
+            assert!(row.contains("code with tabs"));
         }
 
         #[test]
@@ -1597,6 +1747,40 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
         assert!(s.ends_with('…'));
         // 没有正文时摘要为空，界面只显示主题
         assert_eq!(summary_of(&parse_message(&raw("空", ""))), "");
+    }
+
+    #[test]
+    fn body_decoding_survives_missing_and_wrong_charsets() {
+        let chinese = "您的邮箱服务就要到期了";
+        let utf8 = chinese.as_bytes();
+        assert_eq!(decode_body(utf8, "us-ascii"), chinese, "没声明字符集时要按 UTF-8 读，不能退回 Latin-1");
+        assert_eq!(decode_body(utf8, ""), chinese);
+        assert_eq!(decode_body(utf8, "gb2312"), chinese, "声明 gb2312 但正文是 UTF-8 时要纠正");
+        let gbk = encoding_rs::GBK.encode(chinese).0;
+        assert_eq!(decode_body(&gbk, "gb2312"), chinese, "真正的 GBK 正文要按声明读");
+        assert_eq!(decode_body(&gbk, ""), chinese, "没有声明时 GBK 走 GB18030 兜底");
+        assert_eq!(decode_body(b"caf\xe9", "iso-8859-1"), "café");
+    }
+
+    #[test]
+    fn html_source_in_a_plain_part_is_treated_as_html() {
+        let body = "<table width=\"600\" cellpadding=\"0\" bgcolor=\"#E5E5E5\"><tbody><tr><td><p>您的邮箱服务就要到期了</p></td></tr></tbody></table><p>验证码 <b>483921</b></p>";
+        let raw = format!("From: 新浪邮箱团队 <team@example.com>\r\nSubject: 【温馨提示】\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}");
+        let parsed = parse_message(raw.as_bytes());
+        assert!(parsed.text.trim().is_empty(), "HTML 源码不能留在纯文本正文里");
+        assert!(parsed.html.contains("<table"), "HTML 原文要留给排版用");
+        let text = body_of(&parsed);
+        assert!(!text.contains('<') && !text.contains("width="), "正文里不能再出现标签：{text}");
+        assert!(text.contains("您的邮箱服务就要到期了"));
+        assert!(!summary_of(&parsed).contains('<'));
+        assert_eq!(code_of(&parsed).as_deref(), Some("483921"), "表格里的验证码仍要识别");
+        // 普通纯文本里的尖括号不能被误当成 HTML。
+        let plain = parse_message(b"Content-Type: text/plain; charset=utf-8\r\n\r\n<3 hours\r\nif a<b then");
+        assert_eq!(body_of(&plain), "<3 hours\nif a<b then");
+        // 没写 charset（默认 us-ascii）的 UTF-8 中文正文不能再变成 Latin-1 乱码。
+        let raw = format!("From: 新浪邮箱团队\r\nSubject: 提示\r\nContent-Type: text/html; charset=us-ascii\r\n\r\n<table><tr><td>{}</td></tr></table>", "您的邮箱服务就要到期了");
+        let parsed = parse_message(raw.as_bytes());
+        assert_eq!(body_of(&parsed), "您的邮箱服务就要到期了");
     }
 
     #[test]

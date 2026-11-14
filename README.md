@@ -145,6 +145,7 @@ Windows 桌面伙伴，把消息、音乐、日程、天气和 AI 额度放到�
 | 邮箱 | QQ、163、126、腾讯企业邮、iCloud、Gmail、自定义 IMAP | 启用 IMAP，填写授权码或 App 专用密码；自定义服务可填写服务器、端口与登录用户名 |
 | 日历 | 飞书、钉钉、企业微信、iCloud、CalDAV、Exchange ActiveSync | 服务商提供的日历同步凭据与必要的服务器地址；安装桌面客户端不等于授权 |
 | AI 额度 | Codex、Claude、Kimi、Grok Bot、Gemini、ZCode、WorkBuddy、DeepSeek、Kiro | 对应客户端登录、独立授权或 API Key；具体以设置中的连接入口为准 |
+| 验证器 | 手动填写 Base32 密钥，或粘贴 `otpauth://totp/…` 链接 | 6 位、30 秒一步的 SHA1 动态码（Google / Microsoft Authenticator 等通用标准）；密钥只存进 Windows 凭据管理器 |
 
 QQ 收信、邮件日程和飞书个人日历已进行真实账号测试。其他日历入口的可用性与服务端配置、权限和兼容性有关；钉钉、企业微信尚未完成本轮真实账号同步验收。
 
@@ -155,6 +156,8 @@ QQ 收信、邮件日程和飞书个人日历已进行真实账号测试。其�
 
 - 设置、待办、本机日程、饮水记录、剪贴板历史、置物路径与连接元数据保存在 `%APPDATA%\Daozai`。
 - 邮箱和日历密码、DeepSeek API Key 保存在 Windows 凭据管理器；独立 Gemini、WorkBuddy 会话使用 Windows DPAPI 加密。
+- 验证器的 2FA 密钥同样只进 Windows 凭据管理器，`twofa.json` 里只有服务名和账号；动态码在本机按时间计算，不联网。
+- 设置页的「导出邮箱与授权码」会把全部邮箱连同授权码写成 `%APPDATA%\Daozai\exports` 下的文本文件（需点一次确认），文件是明文，请勿分享，用完可自行删除。
 - 微信新消息提醒根据任务栏闪动工作，不读取联系人或聊天正文；QQ 与应用通知需要相应的系统通知权限。
 - 读取已有 AI 客户端登录时不回写原客户端配置。不要把授权码、Cookie、API Key 或登录 JSON 上传到 Issue。
 - 邮箱读取收件箱，不读取垃圾邮件文件夹；邮件正文在当前进程中用于展示和识别。

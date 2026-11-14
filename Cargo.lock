@@ -514,6 +514,7 @@ dependencies = [
  "clipboard-win",
  "eframe",
  "egui_extras",
+ "encoding_rs",
  "flate2",
  "image",
  "imap",
