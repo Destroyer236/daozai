@@ -208,6 +208,8 @@ impl Config {
 #[derive(Clone, Debug, PartialEq)]
 #[derive(serde::Serialize,serde::Deserialize)]
 pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pub reset:Option<i64>,
+    /// 接口明确表示“开始使用后才计时”（例如豆包近 7 天额度尚未启用），此时没有可显示的重置时间。
+    #[serde(default)]pub starts_on_use:bool,
     /// 积分型额度的具体数值（例如 Kiro 的点数）；有值时界面显示数值而不是百分比。
     #[serde(default)]pub amount:Option<Amount>}
 /// 周期额度的绝对数值：剩余量与总额。百分比仍然用于绘制进度，数值用于文字。
@@ -253,7 +255,7 @@ fn reset(v:&Value)->Option<i64>{v.as_i64().filter(|n|*n>0).or_else(||chrono::Dat
 fn cadence(seconds:Option<i64>)->String{match seconds{Some(18000)=>"5 小时".into(),Some(604800)=>"本周".into(),Some(86400)=>"今日".into(),Some(s)if s>0 && s%86400==0=>format!("{} 天",s/86400),Some(s)if s>0 && s%3600==0=>format!("{} 小时",s/3600),Some(s)if s>0=>format!("{} 分钟",s/60),_=>"额度周期".into()}}
 fn codex_window(v:&Value)->Option<Window>{
     let used=number(&v["used_percent"])?;let seconds=v["limit_window_seconds"].as_i64().filter(|s|*s>0);
-    Some(Window{label:cadence(seconds),seconds,remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v["reset_at"]),amount:None})
+    Some(Window{starts_on_use:false,label:cadence(seconds),seconds,remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v["reset_at"]),amount:None})
 }
 pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
     if provider.api_key(){return Err("请使用对应服务的地区及协议解析额度".into());}
@@ -273,19 +275,19 @@ pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
             }
         }
         Provider::Claude=>{
-            for(key,seconds)in [("five_hour",18000),("seven_day",604800)]{if let Some(used)=number(&v[key]["utilization"]){s.windows.push(Window{label:cadence(Some(seconds)),seconds:Some(seconds),remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v[key]["resets_at"]),amount:None});}}
+            for(key,seconds)in [("five_hour",18000),("seven_day",604800)]{if let Some(used)=number(&v[key]["utilization"]){s.windows.push(Window{starts_on_use:false,label:cadence(Some(seconds)),seconds:Some(seconds),remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v[key]["resets_at"]),amount:None});}}
         }
         Provider::Kimi=>{
             if let Some(usages)=v["usages"].as_object(){
                 for (key,label,seconds) in [("limit_5h","5 小时",Some(18000)),("limit_7d","本周",Some(604800)),("limit_month_total","本月总额度",None),("limit_month_code","本月编程",None)]{
                     let Some(entry)=usages.get(key) else{continue;};
                     let Some(used)=number(&entry["used_ratio"]).filter(|n|(0.0..=1.0).contains(n)) else{continue;};
-                    s.windows.push(Window{label:label.into(),seconds,remaining:((1.0-used)*100.0) as f32,reset:reset(&entry["reset_time"]),amount:None});
+                    s.windows.push(Window{starts_on_use:false,label:label.into(),seconds,remaining:((1.0-used)*100.0) as f32,reset:reset(&entry["reset_time"]),amount:None});
                 }
                 if !s.windows.is_empty(){return Ok(s);}
             }
             if v.as_object().is_some_and(|o|o.is_empty()){return Err("Kimi 已登录，官网暂未返回周期额度".into());}
-            let section=|v:&Value,seconds:Option<i64>|->Option<Window>{let limit=number(&v["limit"])?;if limit<=0.0{return None;}let remaining=number(&v["remaining"]).or_else(||Some(limit-number(&v["used"])?))?;Some(Window{label:cadence(seconds),seconds,remaining:(remaining/limit*100.0).clamp(0.0,100.0) as f32,reset:reset(&v["resetTime"]),amount:None})};
+            let section=|v:&Value,seconds:Option<i64>|->Option<Window>{let limit=number(&v["limit"])?;if limit<=0.0{return None;}let remaining=number(&v["remaining"]).or_else(||Some(limit-number(&v["used"])?))?;Some(Window{starts_on_use:false,label:cadence(seconds),seconds,remaining:(remaining/limit*100.0).clamp(0.0,100.0) as f32,reset:reset(&v["resetTime"]),amount:None})};
             if let Some(w)=section(&v["usage"],Some(604800)){s.windows.push(w);}
             for limit in v["limits"].as_array().into_iter().flatten(){let duration=limit["window"]["duration"].as_i64();let unit=limit["window"]["timeUnit"].as_str().unwrap_or_default();let factor=match unit{"TIME_UNIT_MINUTE"=>Some(60),"TIME_UNIT_HOUR"=>Some(3600),"TIME_UNIT_DAY"=>Some(86400),"TIME_UNIT_SECOND"=>Some(1),_=>None};let seconds=duration.zip(factor).and_then(|(d,f)|d.checked_mul(f));if let Some(w)=section(&limit["detail"],seconds){if !s.windows.iter().any(|old|old.seconds==w.seconds){s.windows.push(w);}}}
         }

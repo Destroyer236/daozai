@@ -207,19 +207,26 @@ fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,color
         c.centered_text(left+number_width+2.0,y+3.0,"%",11.0,W::Semibold,theme::GRAY,H::Left);
     }else{c.centered_text(x,y,"—",24.0,W::Semibold,theme::DIM,H::Center);}
 }
-fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
-    let Some(at)=at.and_then(|at|chrono::DateTime::from_timestamp(at,0)) else{return "重置时间未知".into();};
+fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String { reset_text_as("重置",at,now) }
+fn reset_text_as(verb:&str,at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
+    let Some(at)=at.and_then(|at|chrono::DateTime::from_timestamp(at,0)) else{return format!("{verb}时间未知")};
     let at=at.with_timezone(&chrono::Local);
     if at.timestamp()<=now.timestamp(){return "等待刷新".into();}
-    let format=if at.date_naive()==now.date_naive(){"今天 %H:%M 重置"}else if at.year()==now.year(){"%-m月%-d日 %H:%M 重置"}else{"%Y/%-m/%-d %H:%M 重置"};
-    at.format(format).to_string()
+    let format=if at.date_naive()==now.date_naive(){format!("今天 %H:%M {verb}")}else if at.year()==now.year(){format!("%-m月%-d日 %H:%M {verb}")}else{format!("%Y/%-m/%-d %H:%M {verb}")};
+    at.format(&format).to_string()
+}
+/// 有周期的额度会“重置”，活动赠送这类没有周期的额度只会“到期”，不能混用同一个措辞。
+/// 接口表示“开始使用后计时”的额度（例如豆包近 7 天还没启用）没有固定时间，就照官网说法呈现。
+fn window_reset_text(window:&quota::Window,now:&chrono::DateTime<chrono::Local>)->String{
+    if window.starts_on_use{return "开始使用后计时".into();}
+    reset_text_as(if window.seconds.is_none(){"到期"}else{"重置"},window.reset,now)
 }
 fn snapshot_details(snapshot:&Snapshot)->String{
     if let Some(relay)=&snapshot.relay{return relay.full();}
     if snapshot.kiro.is_some(){return kiro_details(snapshot);}
     let mut lines=Vec::new();let now=chrono::Local::now();
     for w in snapshot.windows.iter().chain(snapshot.extra.iter()){
-        lines.push(format!("{}：剩余 {:.1}% · {}",w.label,w.remaining,reset_text(w.reset,&now)));
+        lines.push(format!("{}：剩余 {:.1}% · {}",w.label,w.remaining,window_reset_text(w,&now)));
     }
     lines.join("\n")
 }
@@ -237,14 +244,14 @@ fn kiro_details(snapshot:&Snapshot)->String{
         }else if p.reset.is_some(){reset_text(p.reset,&chrono::Local::now())}else{String::new()};
         format!("{}：{} 点{}",p.label,p.amount.full(),if time.is_empty(){String::new()}else{format!(" · {time}")})
     }).collect::<Vec<_>>();
-    for window in snapshot.windows.iter().skip(1){lines.push(format!("{}：{} 点 · {}",window.label,window.value_text(),reset_text(window.reset,&chrono::Local::now())));}
+    for window in snapshot.windows.iter().skip(1){lines.push(format!("{}：{} 点 · {}",window.label,window.value_text(),window_reset_text(window,&chrono::Local::now())));}
     lines.join("\n")
 }
 fn quota_reset_text(snapshot:&Snapshot,window:&quota::Window,now:&chrono::DateTime<chrono::Local>)->String{
     if window.label=="可用点数"{
         if let Some(details)=&snapshot.kiro{return details.pools.first().map(|p|format!("月度 · {}",reset_text(p.reset,now))).unwrap_or_default();}
     }
-    reset_text(window.reset,now)
+    window_reset_text(window,now)
 }
 fn claude_disclaimer(ui:&mut egui::Ui){
     ui.separator();
@@ -508,7 +515,7 @@ impl App {
                     c.circle(159.0,y-4.0,2.5,color);
                     c.text(168.0,y,&c.fit(&w.label,11.0,W::Semibold,114.0),11.0,W::Semibold,theme::WHITE,H::Left);
                     c.text(355.0,y,&format!("{:.0}%",w.remaining),17.0,W::Semibold,if w.remaining<=0.0{color}else{theme::WHITE},H::Right);
-                    c.text(168.0,y+12.0,&c.fit(&reset_text(w.reset,&now),9.0,W::Regular,187.0),9.0,W::Regular,theme::GRAY,H::Left);
+                    c.text(168.0,y+12.0,&c.fit(&window_reset_text(w,&now),9.0,W::Regular,187.0),9.0,W::Regular,theme::GRAY,H::Left);
                 }
                 let details=c.hit(309.0,51.0,48.0,20.0,("api-quota-details",&a.id)).on_hover_text(snapshot_details(snapshot)).clicked();
                 c.text(355.0,64.0,"明细 ›",10.0,W::Regular,theme::GRAY,H::Right);
@@ -839,16 +846,16 @@ mod tests {
         assert!(details.contains("重置"));
     }
     #[test] fn api_details_include_third_window_tools_and_resets(){
-        let w=|label:&str|quota::Window{label:label.into(),seconds:None,remaining:0.0,reset:Some(4102444800),amount:None};
+        let w=|label:&str|quota::Window{starts_on_use:false,label:label.into(),seconds:None,remaining:0.0,reset:Some(4102444800),amount:None};
         let snapshot=Snapshot{windows:vec![w("滚动"),w("本周"),w("本月")],extra:vec![w("工具额度")],..Default::default()};
-        let detail=snapshot_details(&snapshot);for label in ["滚动","本周","本月","工具额度"]{assert!(detail.contains(label));}assert!(detail.contains("重置"));
+        let detail=snapshot_details(&snapshot);for label in ["滚动","本周","本月","工具额度"]{assert!(detail.contains(label));}assert!(detail.contains("到期"),"没有周期的额度只会到期，不能写成重置");assert!(!detail.contains("重置时间未知"));
     }
     #[test]
     fn claude_local_quota_displays_only_recorded_reset_times(){
         let now=chrono::Local::now();let id="local-fixture".to_string();
         let account=Account{id:id.clone(),provider:Provider::Claude,alias:"离线账号".into(),source:"fixture/config.json".into(),slot:Some("fixture-slot".into()),enabled:true,pinned:true};
         let mut state=State::default();state.config.accounts.push(account.clone());
-        let window=quota::Window{label:"5 小时".into(),seconds:Some(18000),remaining:37.5,reset:None,amount:None};
+        let window=quota::Window{starts_on_use:false,label:"5 小时".into(),seconds:Some(18000),remaining:37.5,reset:None,amount:None};
         let snapshot=Snapshot{at:now.timestamp(),windows:vec![window.clone()],..Default::default()};
         state.receive(quota::Event{id:id.clone(),result:Ok(snapshot.clone())});
         assert_eq!(reset_text(window.reset,&now),"重置时间未知");
@@ -865,7 +872,7 @@ mod tests {
     fn claude_local_records_do_not_restore_old_online_snapshots_or_claim_a_new_update(){
         let path=std::env::temp_dir().join(format!("daozai-claude-cache-{}.json",std::process::id()));
         let mut config=Config::default();let id="claude-local".to_string();config.accounts.push(Account{id:id.clone(),provider:Provider::Claude,alias:"Claude".into(),source:"desktop/config.json".into(),slot:Some("fixture".into()),enabled:true,pinned:true});
-        let at=chrono::Utc::now().timestamp()-3600;let snapshot=Snapshot{at,windows:vec![quota::Window{label:"5 小时".into(),seconds:Some(18000),remaining:72.0,reset:None,amount:None}],..Default::default()};
+        let at=chrono::Utc::now().timestamp()-3600;let snapshot=Snapshot{at,windows:vec![quota::Window{starts_on_use:false,label:"5 小时".into(),seconds:Some(18000),remaining:72.0,reset:None,amount:None}],..Default::default()};
         std::fs::write(&path,serde_json::json!({&id:{"provider":"Claude","slot":"fixture","snapshot":snapshot}}).to_string()).unwrap();
         let mut state=State::restore(config.clone(),path.clone());assert!(state.rows.is_empty(),"迁移后不能把旧联网缓存显示为本地数据");
         state.receive(quota::Event{id:id.clone(),result:Ok(snapshot)});assert!(state.stale[&id].contains("本地记录较旧"));
@@ -874,7 +881,7 @@ mod tests {
     #[test]
     fn claude_verified_history_survives_client_exit_and_island_restart(){
         let path=std::env::temp_dir().join(format!("daozai-claude-exit-{}.json",std::process::id()));let mut config=Config::default();let id="claude-closed".to_string();config.accounts.push(Account{id:id.clone(),provider:Provider::Claude,alias:"Claude".into(),source:"desktop/config.json".into(),slot:Some("verified-owner".into()),enabled:true,pinned:true});
-        let at=chrono::Utc::now().timestamp()-60;let snapshot=Snapshot{at,windows:vec![quota::Window{label:"本周".into(),seconds:Some(604800),remaining:16.0,reset:Some(at+86400),amount:None}],..Default::default()};
+        let at=chrono::Utc::now().timestamp()-60;let snapshot=Snapshot{at,windows:vec![quota::Window{starts_on_use:false,label:"本周".into(),seconds:Some(604800),remaining:16.0,reset:Some(at+86400),amount:None}],..Default::default()};
         let mut state=State::restore(config.clone(),path.clone());state.receive(quota::Event{id:id.clone(),result:Ok(snapshot.clone())});state.receive(quota::Event{id:id.clone(),result:Err("客户端已关闭，等待新记录".into())});assert_eq!(state.rows[&id].as_ref().unwrap().windows,snapshot.windows);assert!(state.stale.contains_key(&id));
         let mut restarted=State::restore(config,path.clone());assert_eq!(restarted.rows[&id].as_ref().unwrap().windows,snapshot.windows);restarted.receive(quota::Event{id:id.clone(),result:Err("等待新记录".into())});assert_eq!(restarted.rows[&id].as_ref().unwrap().windows,snapshot.windows);assert_eq!(restarted.rows[&id].as_ref().unwrap().at,at);std::fs::remove_file(path).unwrap();
     }
@@ -1005,6 +1012,21 @@ mod tests {
         assert_eq!(reset_text(Some(i64::MAX),&now),"重置时间未知");
         assert_eq!(reset_text(Some(now.timestamp()),&now),"等待刷新");
         assert_eq!(reset_text(Some(now.timestamp()-1),&now),"等待刷新");
+    }
+    #[test]
+    fn activity_windows_expire_instead_of_resetting(){
+        let now=chrono::Local.with_ymd_and_hms(2026,10,31,22,0,0).unwrap();
+        let at=chrono::Local.with_ymd_and_hms(2026,11,1,9,0,0).unwrap().timestamp();
+        let activity=quota::Window{starts_on_use:false,label:"活动额度".into(),seconds:None,remaining:96.0,reset:Some(at),amount:None};
+        assert_eq!(window_reset_text(&activity,&now),"11月1日 09:00 到期","没有周期的额度只会到期");
+        let week=quota::Window{starts_on_use:false,label:"本周".into(),seconds:Some(604800),remaining:96.0,reset:Some(at),amount:None};
+        assert_eq!(window_reset_text(&week,&now),"11月1日 09:00 重置");
+        let unknown=quota::Window{starts_on_use:false,label:"活动额度".into(),seconds:None,remaining:96.0,reset:None,amount:None};
+        assert_eq!(window_reset_text(&unknown,&now),"到期时间未知");
+        let trial=quota::Window{starts_on_use:true,label:"本周".into(),seconds:Some(604800),remaining:100.0,reset:None,amount:None};
+        assert_eq!(window_reset_text(&trial,&now),"开始使用后计时","滚动窗口没有固定重置时间，按官网说法呈现");
+        let late_week=quota::Window{starts_on_use:false,label:"本周".into(),seconds:Some(604800),remaining:40.0,reset:Some(now.timestamp()+86400),amount:None};
+        assert_eq!(window_reset_text(&late_week,&now),"11月1日 22:00 重置");
     }
 }
 

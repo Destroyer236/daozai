@@ -35,6 +35,11 @@ fn used_percent(limit: &Value) -> Option<f64> {
     }).filter(|used| used.is_finite())
 }
 
+/// 接口里的时间可能是微秒/毫秒整数，也可能是 0（表示没有下个周期边界）。
+fn timestamp(value: &Value) -> Option<i64> {
+    integer(value).filter(|time| *time > 0).map(|time| if time >= 100_000_000_000 { time / 1000 } else { time })
+}
+
 fn window(limit: &Value) -> Option<Window> {
     let seconds = match integer(&limit["window_type"])? {
         1 => Some(18000),
@@ -43,10 +48,11 @@ fn window(limit: &Value) -> Option<Window> {
         _ => return None,
     };
     let used = used_percent(limit)?;
-    let reset = seconds.and_then(|_| integer(&limit["end_time"])).filter(|time| *time > 0)
-        .map(|time| if time >= 100_000_000_000 { time / 1000 } else { time });
+    let end = timestamp(&limit["end_time"]);
+    // end_time 为 0 表示这个周期还没开始：豆包官网写的是“开始使用后计时”，不是固定重置时间。
+    let starts_on_use = seconds.is_some() && end.is_none();
     let label = match seconds { Some(18000) => "5 小时", Some(604800) => "本周", _ => "其他额度" };
-    Some(Window { label: label.into(), seconds, remaining: (100.0 - used).clamp(0.0, 100.0) as f32, reset, amount: None })
+    Some(Window{starts_on_use,label: label.into(), seconds, remaining: (100.0 - used).clamp(0.0, 100.0) as f32, reset: end, amount: None })
 }
 
 pub fn parse(value: &Value) -> Result<Snapshot, String> {

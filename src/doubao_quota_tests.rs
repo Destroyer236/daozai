@@ -29,7 +29,8 @@ fn parses_five_hour_week_and_bonus_windows() {
     assert_eq!(snapshot.rings()[1].remaining, 44.0);
     assert_eq!(snapshot.rings()[0].reset, Some(1900008000));
     assert_eq!(snapshot.extra[0].remaining, 75.0);
-    assert_eq!(snapshot.extra[0].reset, None, "活动结束时间不能冒充周期重置");
+    assert_eq!(snapshot.extra[0].reset, Some(1900000000), "活动额度的时间只能按“到期”呈现，不能当成周期重置");
+    assert_eq!(snapshot.extra[0].seconds, None);
 }
 
 #[test]
@@ -93,7 +94,25 @@ fn activity_only_and_empty_plan_names_are_supported() {
     assert_eq!(snapshot.rings()[0].remaining, 70.0);
     let unclassified = parse(&one_limit(json!({"window_type":3,"used_percent":30,"end_time":1900000000000i64}))).unwrap();
     assert_eq!(unclassified.windows[0].label,"其他额度","未知窗口不能仅按数字推断为活动或月额度");
-    assert_eq!(unclassified.windows[0].reset,None);
+    assert_eq!(unclassified.windows[0].reset,Some(1900000000));
+}
+
+#[test]
+fn an_unstarted_cycle_waits_for_first_use_instead_of_inventing_a_time() {
+    let unstarted = json!({"data":{
+        "current_subscription":{"is_gift":true,"agreement_price":0,"end_time":1797088644438i64},
+        "window_limit_section":{"window_limit_groups":[{"window_limits":[{"window_type":2,"used_percent":0,"end_time":0}]}]}
+    }});
+    let snapshot = parse(&unstarted).unwrap();
+    assert_eq!(snapshot.windows[0].label, "本周");
+    assert_eq!(snapshot.windows[0].reset, None, "接口没给时间，不能拿订阅结束时间顶替成“重置”");
+    assert!(snapshot.windows[0].starts_on_use, "官网写的是“开始使用后计时”");
+    let started = json!({"data":{
+        "window_limit_section":{"window_limit_groups":[{"window_limits":[{"window_type":2,"used_percent":0,"end_time":1797088644438i64}]}]}
+    }});
+    let snapshot = parse(&started).unwrap();
+    assert_eq!(snapshot.windows[0].reset, Some(1797088644));
+    assert!(!snapshot.windows[0].starts_on_use, "已经给出结束时间就不再是“开始使用后计时”");
 }
 
 #[test]
