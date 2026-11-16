@@ -24,6 +24,8 @@ pub(crate) mod relay;
 pub(crate) mod api;
 #[path="kiro_quota.rs"]
 pub(crate) mod kiro;
+#[path="cursor_quota.rs"]
+pub(crate) mod cursor;
 #[path="native_auth.rs"]
 mod native_auth;
 
@@ -36,10 +38,10 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao, Cursor }
 impl Provider {
-    pub const ALL: [Self; 16] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API",Self::Kiro=>"Kiro",Self::Doubao=>"豆包"} }
+    pub const ALL: [Self; 17] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao, Self::Cursor];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API",Self::Kiro=>"Kiro",Self::Doubao=>"豆包",Self::Cursor=>"Cursor"} }
     pub fn api_key(self)->bool{matches!(self,Self::OpenCodeGo|Self::MiniMax|Self::Glm|Self::NewApi|Self::OneApi|Self::Sub2Api)}
     pub fn relay(self)->bool{matches!(self,Self::NewApi|Self::OneApi|Self::Sub2Api)}
     pub fn balance(self)->bool{matches!(self,Self::WorkBuddy|Self::DeepSeek)||self.relay()}
@@ -86,6 +88,7 @@ impl Config {
         if provider==Provider::DeepSeek{return Err("请使用 API Key 连接 DeepSeek".into());}
         if provider==Provider::Gemini{return Err("请使用浏览器或 Cookie 连接 Gemini 网页账号".into());}
         if provider==Provider::Doubao{return Err("请使用浏览器或 Cookie 连接豆包网页账号".into());}
+        if provider==Provider::Cursor{return Err("请粘贴 Cursor 会话令牌连接网页账号".into());}
         if provider==Provider::GrokBot{return self.import_grok(&source,&alias).map(|_|());}
         if provider==Provider::Claude{return self.import_claude(&source,&alias).map(|_|());}
         if !source.is_file(){return Err("请选择已有的登录 JSON 文件".into());}
@@ -200,6 +203,11 @@ impl Config {
         let account=self.accounts.iter_mut().find(|a|a.id==id&&a.provider==Provider::DeepSeek).ok_or("原账号已移除，请重新添加")?;
         account.slot=Some(slot);account.alias=alias;self.selected=id.into();Ok(id.into())
     }
+    pub fn connect_cursor(&mut self,slot:String,alias:String)->String{
+        if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::Cursor&&a.slot.as_deref()==Some(&slot)){a.alias=alias;a.enabled=true;self.selected=a.id.clone();return a.id.clone();}
+        let id=format!("Cursor-{slot}");let pinned=self.pinned_indices().len()<3;
+        self.selected=id.clone();self.accounts.push(Account{id:id.clone(),provider:Provider::Cursor,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});id
+    }
     pub fn connect_deepseek(&mut self,slot:String,alias:String)->String{
         if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::DeepSeek&&a.slot.as_deref()==Some(&slot)){a.alias=alias;a.enabled=true;self.selected=a.id.clone();return a.id.clone();}
         let id=format!("DeepSeek-{slot}");self.selected=id.clone();self.accounts.push(Account{id:id.clone(),provider:Provider::DeepSeek,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned:true});id
@@ -265,6 +273,7 @@ pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
     if provider==Provider::Gemini{return gemini::parse(v);}
     if provider==Provider::Kiro{return kiro::parse(v);}
     if provider==Provider::Doubao{return doubao::parse(v);}
+    if provider==Provider::Cursor{return cursor::parse(v);}
     let mut s=Snapshot{plan:v["plan_type"].as_str().unwrap_or_default().into(),at:chrono::Utc::now().timestamp(),..Default::default()};
     match provider {
         Provider::Codex=>{
@@ -326,7 +335,7 @@ pub struct Event {pub id:String,pub result:Result<Snapshot,String>}
 #[derive(Default)]
 struct Pending {accounts:Option<Vec<Account>>,running:bool,cooldowns:HashMap<(String,Option<String>,PathBuf),(Instant,String)>}
 type PendingAccounts = std::sync::Arc<std::sync::Mutex<Pending>>;
-fn service_group(provider:Provider)->usize{match provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::OpenCodeGo=>3,Provider::MiniMax=>4,Provider::Glm=>5,Provider::NewApi=>6,Provider::OneApi=>7,Provider::Sub2Api=>8,Provider::Kiro=>9,_=>0}}
+fn service_group(provider:Provider)->usize{match provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::OpenCodeGo=>3,Provider::MiniMax=>4,Provider::Glm=>5,Provider::NewApi=>6,Provider::OneApi=>7,Provider::Sub2Api=>8,Provider::Kiro=>9,Provider::Cursor=>10,_=>0}}
 struct Worker {pending:PendingAccounts,wake:mpsc::SyncSender<()>}
 pub struct Service {
     workers:HashMap<usize,Worker>,
@@ -337,7 +346,7 @@ impl Service {
     pub fn start()->Self{let(results,rx)=mpsc::channel();Self{workers:HashMap::new(),results,rx}}
     pub fn refresh(&mut self,accounts:Vec<Account>)->bool{self.refresh_with(accounts,fetch)}
     fn refresh_with(&mut self,accounts:Vec<Account>,run:impl Fn(&ureq::Agent,&Account)->Result<Snapshot,(String,u64)>+Clone+Send+'static)->bool{
-        let mut groups:Vec<Vec<Account>>=(0..10).map(|_|Vec::new()).collect();
+        let mut groups:Vec<Vec<Account>>=(0..11).map(|_|Vec::new()).collect();
         for account in accounts.into_iter().filter(|account|account.enabled){groups[service_group(account.provider)].push(account);}
         for (group,accounts) in groups.into_iter().enumerate(){
             if let Some(worker)=self.workers.get(&group){
@@ -426,6 +435,7 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
     if account.provider==Provider::Kiro{return kiro::fetch(agent,account);}
     if account.provider==Provider::Doubao{return doubao::fetch(agent,account);}
+    if account.provider==Provider::Cursor{return cursor::fetch(agent,account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;
     let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",_=>unreachable!()};
     let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");

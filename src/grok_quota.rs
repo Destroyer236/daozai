@@ -117,7 +117,7 @@ fn http_error(error:ureq::Error)->(String,u64){match error{
     ureq::Error::Status(code,_)=>(format!("Grok Bot 额度服务暂不可用（{code}）"),60),
     _=>("无法连接 Grok Bot，请检查网络或代理".into(),30),
 }}
-fn checksum(machine:&str,millis:i64)->String{
+pub(crate) fn checksum(machine:&str,millis:i64)->String{
     let stamp=(millis/1_000_000) as u32;
     // 与客户端 JavaScript 的移位规则一致：移位数按 32 取模。
     let mut bytes=[(stamp>>8) as u8,stamp as u8,(stamp>>24) as u8,(stamp>>16) as u8,(stamp>>8) as u8,stamp as u8];
@@ -159,7 +159,7 @@ pub fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>
 }
 
 pub struct Connected {pub slot:String,pub label:String}
-fn uuid()->String{
+pub(crate) fn uuid()->String{
     // 请求标识无需保密，以纳秒时间和进程号生成，避免依赖系统随机源。
     let input=format!("{}:{}",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default());
     let hash=digest::digest(&digest::SHA256,input.as_bytes());let mut bytes=[0u8;16];bytes.copy_from_slice(&hash.as_ref()[..16]);
