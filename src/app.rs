@@ -577,6 +577,8 @@ pub(crate) struct MailForm {
     pub email: String,
     pub password: String,
     pub show: bool,
+    /// Microsoft 浏览器登录的等待通道：登录结果由后台线程送回，界面每帧取一次。
+    pub signin: Option<std::sync::mpsc::Receiver<Result<crate::microsoft_oauth::SignedIn,String>>>,
 }
 
 /// 验证器设置里的手动添加表单；`uri` 用于粘贴 otpauth 链接，`note` 显示上一次的结果。

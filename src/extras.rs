@@ -1862,6 +1862,19 @@ impl App {
                         });
                         settings_label(ui,"添加邮箱");
                         settings_card(ui,|ui|{
+                            // 浏览器登录在后台线程等待回调，这里每帧取一次结果。
+                            if let Some(rx)=self.mail.form.signin.take(){
+                                match rx.try_recv(){
+                                    Ok(Ok(signed))=>{
+                                        if !signed.email.is_empty(){self.mail.form.email=signed.email;}
+                                        self.mail.form.password=signed.refresh;
+                                        self.mail.note=format!("{}：Microsoft 登录完成，点「保存并开始监控」",self.mail.form.email);
+                                    }
+                                    Ok(Err(error))=>self.mail.note=error,
+                                    Err(std::sync::mpsc::TryRecvError::Empty)=>self.mail.form.signin=Some(rx),
+                                    Err(std::sync::mpsc::TryRecvError::Disconnected)=>self.mail.note="浏览器登录线程意外结束，请重试".into(),
+                                }
+                            }
                             settings_control_row(ui,"邮箱服务",56.0,|ui|{
                                 egui::ComboBox::from_id_salt("mail-provider").width(160.0).selected_text(self.mail.form.provider.label()).show_ui(ui,|ui|{
                                     for p in crate::mail::Provider::ALL{if ui.selectable_label(self.mail.form.provider==p,p.label()).clicked(){self.mail.form.provider=p;}}
@@ -1879,27 +1892,47 @@ impl App {
                                 settings_control_row(ui,"TLS 端口",80.0,|ui|{ui.add(egui::DragValue::new(&mut self.mail.form.custom.port).range(1..=65535))});
                                 settings_control_row(ui,"登录用户名",80.0,|ui|{ui.add(egui::TextEdit::singleline(&mut self.mail.form.custom.username).vertical_align(egui::Align::Center).hint_text("留空使用邮箱地址"))});
                             }
-                            if !microsoft{
                             let input_width=(ui.available_width()-56.0-48.0-2.0*ui.spacing().item_spacing.x).max(100.0);
                             settings_control_row(ui,"邮箱",56.0,|ui|{
                                 ui.add_sized([input_width,30.0],egui::TextEdit::singleline(&mut self.mail.form.email).vertical_align(egui::Align::Center).hint_text("输入邮箱地址"))
                             });
-                            let target=crate::mail::Account{custom:(self.mail.form.provider==crate::mail::Provider::Custom).then(||self.mail.form.custom.clone()),email:self.mail.form.email.clone(),provider:self.mail.form.provider,enabled:true};
-                            let unsupported=target.endpoint().err().as_deref()==Some(crate::mail::MICROSOFT_UNSUPPORTED);
-                            if unsupported{ui.add(egui::Label::new(crate::mail::MICROSOFT_UNSUPPORTED).wrap());}
-                            ui.add_enabled_ui(!unsupported,|ui|{
-                            settings_control_row(ui,"授权码",56.0,|ui|{
-                                let field=ui.add_sized([input_width,30.0],egui::TextEdit::singleline(&mut self.mail.form.password).vertical_align(egui::Align::Center).password(!self.mail.form.show).hint_text("输入邮箱授权码"));
-                                if ui.add_sized([48.0,30.0],egui::Button::new(if self.mail.form.show{"隐藏"}else{"显示"})).clicked(){self.mail.form.show=!self.mail.form.show;}
-                                field
-                            });
+                            if microsoft{
+                                let pending=self.mail.form.signin.is_some();
+                                let signed=!self.mail.form.password.is_empty();
+                                ui.horizontal(|ui|{
+                                    if ui.add_enabled(!pending,egui::Button::new(if pending{"等待浏览器…"}else{"用浏览器登录 Microsoft"})).clicked(){
+                                        let email=self.mail.form.email.trim().to_string();
+                                        if !email.contains('@'){self.mail.note="请先填邮箱地址".into();}
+                                        else{match crate::microsoft_oauth::begin(&email){
+                                            Ok(flow)=>{
+                                                let url=flow.url().to_string();
+                                                self.pending.push(Cmd::OpenUrl(url));
+                                                let (tx,rx)=std::sync::mpsc::channel();
+                                                std::thread::spawn(move||{let _=tx.send(crate::microsoft_oauth::wait(flow));});
+                                                self.mail.form.signin=Some(rx);
+                                                self.mail.note="已打开浏览器，请登录并同意授权…".into();
+                                            }
+                                            Err(error)=>self.mail.note=error,
+                                        }}
+                                    }
+                                    ui.label(egui::RichText::new(if pending{"浏览器里完成后自动回到这里"}else if signed{"已取得登录，点保存"}else{"不需要授权码"}).size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                                });
+                            }else{
+                                let target=crate::mail::Account{custom:(self.mail.form.provider==crate::mail::Provider::Custom).then(||self.mail.form.custom.clone()),email:self.mail.form.email.clone(),provider:self.mail.form.provider,enabled:true};
+                                if let Err(error)=target.endpoint(){ui.add(egui::Label::new(error).wrap());}
+                                settings_control_row(ui,"授权码",56.0,|ui|{
+                                    let field=ui.add_sized([input_width,30.0],egui::TextEdit::singleline(&mut self.mail.form.password).vertical_align(egui::Align::Center).password(!self.mail.form.show).hint_text("输入邮箱授权码"));
+                                    if ui.add_sized([48.0,30.0],egui::Button::new(if self.mail.form.show{"隐藏"}else{"显示"})).clicked(){self.mail.form.show=!self.mail.form.show;}
+                                    field
+                                });
+                            }
                             ui.horizontal(|ui|{
                                 if ui.button("测试连接").clicked(){
                                     let email=self.mail.form.email.trim().to_string();
                                     let target=crate::mail::Account{custom:(self.mail.form.provider==crate::mail::Provider::Custom).then(||self.mail.form.custom.clone()),email:email.clone(),provider:self.mail.form.provider,enabled:true};
                                     if !email.contains('@'){self.mail.note="请先填邮箱地址".into();}
                                     else if let Err(error)=target.endpoint(){self.mail.note=error;}
-                                    else if self.mail.form.password.is_empty(){self.mail.note="请先填授权码（不是邮箱登录密码）".into();}
+                                    else if self.mail.form.password.is_empty(){self.mail.note=if microsoft{"请先点「用浏览器登录 Microsoft」".into()}else{"请先填授权码（不是邮箱登录密码）".into()};}
                                     else{
                                         self.mail.testing=Some(email.clone());
                                         self.mail.note=format!("{email}：正在测试连接…");
@@ -1911,7 +1944,7 @@ impl App {
                                     let target=crate::mail::Account{custom:(self.mail.form.provider==crate::mail::Provider::Custom).then(||self.mail.form.custom.clone()),email:email.clone(),provider:self.mail.form.provider,enabled:true};
                                     if !email.contains('@'){self.mail.note="请先填邮箱地址".into();}
                                     else if let Err(error)=target.endpoint(){self.mail.note=error;}
-                                    else if self.mail.form.password.is_empty(){self.mail.note="请先填授权码（不是邮箱登录密码）".into();}
+                                    else if self.mail.form.password.is_empty(){self.mail.note=if microsoft{"请先点「用浏览器登录 Microsoft」".into()}else{"请先填授权码（不是邮箱登录密码）".into()};}
                                     else{
                                         match crate::mail::secrets::save(&target.credential_key(),&self.mail.form.password){
                                             Ok(())=>{
@@ -1926,9 +1959,7 @@ impl App {
                                     }
                                 }
                             });
-                            ui.label(egui::RichText::new("授权码存储在 Windows 凭据管理器中。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            });
-                            }
+                            ui.label(egui::RichText::new(if microsoft{"登录凭据（refresh token）保存在 Windows 凭据管理器中。"}else{"授权码存储在 Windows 凭据管理器中。"}).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             ui.label(egui::RichText::new("图片中的验证码请在邮箱查看。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             if !self.mail.note.is_empty(){ui.add_space(3.0);ui.add(egui::Label::new(egui::RichText::new(&self.mail.note).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75)))).wrap());}
                         });

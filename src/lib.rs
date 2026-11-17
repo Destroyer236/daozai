@@ -27,6 +27,7 @@ pub mod icons;
 pub mod input;
 pub mod lyrics;
 pub mod mail;
+pub mod microsoft_oauth;
 pub mod mail_format;
 mod mail_reader;
 pub mod mail_manage;

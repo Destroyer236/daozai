@@ -5397,7 +5397,7 @@ fn mail_html_headings_scale_with_the_body_font(){
 }
 
 #[test]
-fn mail_microsoft_settings_only_explains_unsupported_access(){
+fn mail_microsoft_settings_offer_browser_sign_in(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.open_mail_settings();h.ctx.set_embed_viewports(false);
     h.app.mail.accounts.clear();h.app.mail.form.provider=crate::mail::Provider::Microsoft;
@@ -5410,16 +5410,17 @@ fn mail_microsoft_settings_only_explains_unsupported_access(){
     for _ in 0..3{let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));}
     let child=output.lock().unwrap().take().unwrap();
     let texts=child.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text()),_=>None}).collect::<Vec<_>>();
-    assert!(texts.iter().any(|t|t.contains("OAuth")&&t.contains("暂不支持")),"应明确说明微软邮箱的支持状态");
-    for absent in ["使用 Microsoft 登录","可留空，在浏览器选择账号","输入邮箱授权码","测试连接","保存并开始监控","应用 ID"]{
-        assert!(!texts.iter().any(|t|t.contains(absent)),"暂不支持时不应出现误导入口：{absent}");
+    assert!(texts.iter().any(|t|t.contains("用浏览器登录 Microsoft")),"微软邮箱应给出浏览器登录入口");
+    assert!(texts.iter().any(|t|t.contains("不需要授权码")),"应说明微软邮箱不需要授权码");
+    for absent in ["输入邮箱授权码","暂不支持"]{
+        assert!(!texts.iter().any(|t|t.contains(absent)),"浏览器登录流程里不应出现旧提示：{absent}");
     }
     assert!(h.app.mail.accounts.is_empty());
-    assert!(!h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::MailTest(..)|crate::app::Cmd::OpenUrl(_))));
+    assert!(!h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::MailTest(..)|crate::app::Cmd::OpenUrl(_))),"没有点击登录前不应打开浏览器");
 }
 
 #[test]
-fn mail_microsoft_custom_host_and_address_disable_password_actions(){
+fn mail_microsoft_custom_host_is_guided_to_browser_sign_in(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.open_mail_settings();h.ctx.set_embed_viewports(false);h.app.mail.accounts.clear();
     let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
@@ -5436,22 +5437,20 @@ fn mail_microsoft_custom_host_and_address_disable_password_actions(){
         h.app.mail.form.password.clear();h.app.mail.note.clear();
         for _ in 0..3{let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));}
         let child=output.lock().unwrap().take().unwrap();
-        assert!(child.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()==crate::mail::MICROSOFT_UNSUPPORTED)));
-        for label in ["测试连接","保存并开始监控"]{
-            let point=child.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap();
-            for pressed in [true,false]{
-                *events.lock().unwrap()=vec![egui::Event::PointerMoved(point),egui::Event::PointerButton{pos:point,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}];
-                let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
-            }
-            assert!(h.app.mail.note.is_empty(),"微软云连接的按钮应停用，点击不应再提示填写授权码");
+        assert!(child.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()==crate::mail::MICROSOFT_AS_PASSWORD)),"微软云邮箱应引导到浏览器登录");
+        let point=child.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()=="测试连接"=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap();
+        for pressed in [true,false]{
+            *events.lock().unwrap()=vec![egui::Event::PointerMoved(point),egui::Event::PointerButton{pos:point,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}];
+            let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
         }
+        assert_eq!(h.app.mail.note,crate::mail::MICROSOFT_AS_PASSWORD,"点击测试应先说明要改用浏览器登录，而不是要求填授权码");
         assert!(h.app.mail.accounts.is_empty());
         assert!(!h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::MailTest(..)|crate::app::Cmd::MailSync)));
     }
 }
 
 #[test]
-#[ignore="按需导出微软邮箱暂不支持提示的实际画面"]
+#[ignore="按需导出微软邮箱登录页的实际画面"]
 fn mail_microsoft_settings_gallery(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_MAIL_GALLERY_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
@@ -5472,7 +5471,7 @@ fn mail_microsoft_settings_gallery(){
             let child=output.lock().unwrap().take().unwrap();raster.update_textures(&child.textures_delta);
             if frame==3{
                 raster.buf.fill([0.08,0.08,0.09,1.0]);raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
-                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join(if custom{"microsoft-custom-unsupported.png"}else{"microsoft-unsupported.png"}),&rgba,1035,1950,image::ColorType::Rgba8).unwrap();
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join(if custom{"microsoft-custom-guidance.png"}else{"microsoft-login.png"}),&rgba,1035,1950,image::ColorType::Rgba8).unwrap();
             }raster.free_textures(&child.textures_delta);
         }
     }
