@@ -244,7 +244,7 @@ impl Connect {
                     #[cfg(windows)]
                     LoginSource::Browser => login::browser(&worker_cancel)?,
                     #[cfg(windows)]
-                    LoginSource::Local => login::local()?,
+                    LoginSource::Local => login::local(&worker_cancel)?,
                     #[cfg(not(windows))]
                     _ => return Err("豆包官网登录暂仅支持 Windows，也可使用 Cookie 连接".into()),
                 };

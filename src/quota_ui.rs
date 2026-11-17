@@ -804,7 +804,7 @@ impl App {
                     }
                     if ui.button("打开豆包额度").clicked(){self.pending.push(Cmd::OpenUrl("https://www.doubao.com/member/quota-management".into()));}
                 });
-                ui.add(egui::Label::new("无需浏览器扩展，在独立窗口完成豆包官网登录。也可导入本机豆包客户端当前账号；登录状态加密保存在本机。").wrap());
+                ui.add(egui::Label::new("无需浏览器扩展，在独立窗口完成豆包官网登录。也可导入本机豆包客户端当前账号（客户端运行时会锁定登录库，此时需一次管理员授权生成只读快照）；登录状态加密保存在本机。").wrap());
                 ui.collapsing("使用 Cookie 连接",|ui|{
                     ui.label("在豆包网页按 F12，打开网络，复制额度请求的完整 Cookie 请求头。");
                     ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.doubao_cookie).password(true).hint_text("粘贴 Cookie 请求头"));

@@ -8,6 +8,9 @@ use tungstenite::{client::client_with_config, protocol::WebSocketConfig, Message
 const LOCAL_ERROR: &str = "无法读取本机豆包当前登录，请使用浏览器登录；无需安装扩展";
 const BROWSER_ERROR: &str = "无法连接豆包登录窗口，请关闭该窗口后重试";
 const CANCELLED: &str = "已取消豆包连接";
+const NOT_LOGGED_IN: &str = "本机豆包客户端尚未登录，请先在豆包客户端完成登录";
+const LOCKED_DENIED: &str = "读取本机豆包登录需要一次管理员授权（生成只读快照），已取消；也可退出豆包客户端后重试";
+const LOCKED_ERROR: &str = "豆包客户端正在运行并锁定登录库，快照读取失败；请退出豆包客户端后重试，或改用浏览器登录";
 
 fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
     if cancel.load(Ordering::Acquire) { Err(CANCELLED.into()) } else { Ok(()) }
@@ -192,16 +195,138 @@ fn read_native(path: &Path, key: &[u8]) -> Result<String, String> {
     header(&cookies).map_err(|_| LOCAL_ERROR.into())
 }
 
-pub(super) fn local() -> Result<String, String> {
+pub(super) fn local(cancel: &AtomicBool) -> Result<String, String> {
     let base = std::env::var_os("LOCALAPPDATA").ok_or(LOCAL_ERROR)?;
+    let mut locked = false;
     for app in ["Doubao", "DoubaoWork"] {
+        check_cancel(cancel)?;
         let root = Path::new(&base).join(app).join("User Data");
         let Ok(path) = profile(&root) else { continue };
         if !path.is_file() { continue; }
-        let Ok(key) = super::super::native_auth::key(&root.join("Local State")) else { continue };
-        if let Ok(header) = read_native(&path, &key) { return Ok(header); }
+        let state = root.join("Local State");
+        if let Ok(key) = super::super::native_auth::key(&state) {
+            if let Ok(header) = read_native(&path, &key) { return session(header); }
+        }
+        if !locked_by_client(&path) { continue; }
+        // 客户端运行期间会独占锁定 Cookies 库，普通读法一定失败；此时按只读快照取一份副本。
+        locked = true;
+        let files = snapshot(&path, &state, cancel)?;
+        let header = super::super::native_auth::key(&files.join("Local State"))
+            .and_then(|key| read_native(&files.join("Cookies"), &key).map_err(|_| ()));
+        let _ = fs::remove_dir_all(files.parent().unwrap_or(&files));
+        if let Ok(header) = header { return session(header); }
     }
-    Err(LOCAL_ERROR.into())
+    Err(if locked { LOCKED_ERROR } else { LOCAL_ERROR }.into())
+}
+
+/// 本机登录必须带账号标识，否则说明客户端里的账号没有登录。
+fn session(header: String) -> Result<String, String> {
+    if super::session_value(&header, "uid_tt").is_some() && super::session_value(&header, "sessionid_ss").is_some() {
+        Ok(header)
+    } else {
+        Err(NOT_LOGGED_IN.into())
+    }
+}
+
+fn locked_by_client(path: &Path) -> bool {
+    matches!(fs::File::open(path).err().and_then(|error| error.raw_os_error()), Some(32) | Some(5))
+}
+
+fn relative(path: &Path) -> Option<(String, String)> {
+    use std::path::Component;
+    let mut parts = path.components();
+    let Component::Prefix(prefix) = parts.next()? else { return None };
+    if !matches!(parts.next()?, Component::RootDir) { return None; }
+    let volume = format!("{}\\", prefix.as_os_str().to_string_lossy());
+    let rest = parts.map(|part| part.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("\\");
+    if rest.is_empty() { return None; }
+    Some((volume, rest))
+}
+
+fn quoted(raw: &str) -> String { format!("'{}'", raw.replace('\'', "''")) }
+
+fn snapshot_script(volume: &str, cookies: &str, state: &str, out: &Path, marker: &Path) -> String {
+    let mut script = String::from("$ErrorActionPreference='Stop'\r\n");
+    script.push_str(&format!("$out={}\r\n$marker={}\r\n$id=$null\r\n", quoted(&out.to_string_lossy()), quoted(&marker.to_string_lossy())));
+    script.push_str("try{\r\n  New-Item -ItemType Directory -Force -Path $out | Out-Null\r\n");
+    script.push_str("  $r=Invoke-CimMethod -ClassName Win32_ShadowCopy -Namespace root/cimv2 -MethodName Create -Arguments @{Volume=");
+    script.push_str(&quoted(volume));
+    script.push_str(";Context='ClientAccessible'}\r\n  if($r.ReturnValue -ne 0){throw 'SHADOW_CREATE'}\r\n");
+    script.push_str("  $id=$r.ShadowID\r\n  $dev=(Get-CimInstance -ClassName Win32_ShadowCopy | Where-Object {$_.ID -eq $id}).DeviceObject\r\n");
+    script.push_str("  if(-not $dev){throw 'SHADOW_DEVICE'}\r\n");
+    script.push_str(&format!("  Copy-Item -LiteralPath ($dev+{}) -Destination (Join-Path $out 'Cookies') -Force\r\n", quoted(&format!("\\{cookies}"))));
+    script.push_str(&format!("  Copy-Item -LiteralPath ($dev+{}) -Destination (Join-Path $out 'Local State') -Force\r\n", quoted(&format!("\\{state}"))));
+    script.push_str("  'ok'|Set-Content -LiteralPath $marker -Encoding ascii\r\n");
+    script.push_str("}catch{('fail:'+$_.Exception.Message)|Set-Content -LiteralPath $marker -Encoding utf8}\r\n");
+    script.push_str("finally{if($id){& \"$env:SystemRoot\\System32\\vssadmin.exe\" delete shadows /shadow=\"$id\" /quiet 2>$null|Out-Null}}\r\n");
+    script
+}
+
+fn elevated() -> bool {
+    use windows::Win32::{Foundation::{CloseHandle, HANDLE}, Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
+        System::Threading::{GetCurrentProcess, OpenProcessToken}};
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() { return false; }
+        let mut info = TOKEN_ELEVATION::default();
+        let mut length = 0u32;
+        let result = GetTokenInformation(token, TokenElevation, Some((&mut info as *mut TOKEN_ELEVATION).cast()), std::mem::size_of::<TOKEN_ELEVATION>() as u32, &mut length);
+        let _ = CloseHandle(token);
+        result.is_ok() && info.TokenIsElevated != 0
+    }
+}
+
+fn powershell() -> Option<PathBuf> {
+    std::env::var_os("SystemRoot").map(PathBuf::from)
+        .map(|root| root.join("System32/WindowsPowerShell/v1.0/powershell.exe")).filter(|path| path.is_file())
+}
+
+fn launch(script: &Path) -> Result<(), String> {
+    let exe = powershell().ok_or(LOCKED_ERROR)?;
+    if elevated() {
+        Command::new(&exe).args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"]).arg(script)
+            .stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x08000000).spawn().map_err(|_| LOCKED_ERROR)?;
+        return Ok(());
+    }
+    use windows::{core::PCWSTR, Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_HIDE}};
+    let wide = |text: &str| text.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let params = wide(&format!("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\"", script.display()));
+    let file = wide(&exe.to_string_lossy());
+    let verb = wide("runas");
+    let result = unsafe { ShellExecuteW(None, PCWSTR(verb.as_ptr()), PCWSTR(file.as_ptr()), PCWSTR(params.as_ptr()), PCWSTR::null(), SW_HIDE) };
+    // ShellExecuteW 用返回值大于 32 表示成功；被取消或没有权限时会直接失败，不必再等标记文件。
+    if result.0 as isize <= 32 { return Err(LOCKED_DENIED.into()); }
+    Ok(())
+}
+
+/// 通过卷快照读一份 Cookies 与 Local State 的副本，目录由调用方清理。
+fn snapshot(cookies: &Path, state: &Path, cancel: &AtomicBool) -> Result<PathBuf, String> {
+    use ring::rand::SecureRandom;
+    check_cancel(cancel)?;
+    let (volume, cookies_rel) = relative(cookies).ok_or(LOCKED_ERROR)?;
+    let (_, state_rel) = relative(state).ok_or(LOCKED_ERROR)?;
+    let mut random = [0u8; 8];
+    ring::rand::SystemRandom::new().fill(&mut random).map_err(|_| LOCKED_ERROR)?;
+    let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let root = crate::model::config_dir().join("doubao-snapshot").join(name);
+    let out = root.join("files");
+    fs::create_dir_all(&out).map_err(|_| LOCKED_ERROR)?;
+    let marker = root.join("status.txt");
+    let script = root.join("snapshot.ps1");
+    fs::write(&script, snapshot_script(&volume, &cookies_rel, &state_rel, &out, &marker)).map_err(|_| LOCKED_ERROR)?;
+    if let Err(error) = launch(&script) { let _ = fs::remove_dir_all(&root); return Err(error); }
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        if let Ok(raw) = fs::read_to_string(&marker) {
+            let _ = fs::remove_file(&marker);
+            if raw.trim() == "ok" && out.join("Cookies").is_file() && out.join("Local State").is_file() { return Ok(out); }
+            let _ = fs::remove_dir_all(&root);
+            return Err(LOCKED_ERROR.into());
+        }
+        if cancel.load(Ordering::Acquire) { let _ = fs::remove_dir_all(&root); return Err(CANCELLED.into()); }
+        if Instant::now() >= deadline { let _ = fs::remove_dir_all(&root); return Err(LOCKED_ERROR.into()); }
+        std::thread::sleep(Duration::from_millis(150));
+    }
 }
 
 #[cfg(test)]

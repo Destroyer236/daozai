@@ -141,8 +141,35 @@ fn doubao_browser_transport_local() {
 #[test]
 #[ignore = "只读验证本机豆包当前登录及额度，不保存凭据"]
 fn doubao_local_live_read_only() {
-    let header = local().expect("读取本机豆包当前登录");
+    let header = local(&AtomicBool::new(false)).expect("读取本机豆包当前登录");
     let snapshot = super::super::request(&super::super::super::http_agent(), ENDPOINT, &header).map_err(|error|error.0).expect("只读查询豆包额度");
     assert!(!snapshot.windows.is_empty());
     println!("本机豆包识别及额度查询通过：{} 个周期，{} 项额外额度", snapshot.windows.len(), snapshot.extra.len());
+}
+
+#[test]
+fn snapshot_paths_are_relative_to_the_volume_and_escaped_for_powershell() {
+    let (volume, relative_cookies) = relative(Path::new(r"C:\Users\a\Doubao\User Data\Default\Network\Cookies")).unwrap();
+    assert_eq!(volume, "C:\\");
+    assert_eq!(relative_cookies, r"Users\a\Doubao\User Data\Default\Network\Cookies");
+    assert!(relative(Path::new(r"relative\Cookies")).is_none());
+    assert!(relative(Path::new(r"C:\")).is_none());
+    assert_eq!(quoted("a'b"), "'a''b'");
+}
+
+#[test]
+fn snapshot_script_copies_both_files_and_always_removes_the_shadow() {
+    let script = snapshot_script("C:\\", r"Users\a\Cookies", r"Users\a\Local State", Path::new(r"C:\out"), Path::new(r"C:\out\status.txt"));
+    assert!(script.contains("Win32_ShadowCopy"));
+    assert!(script.contains(r"($dev+'\Users\a\Cookies')"));
+    assert!(script.contains(r"($dev+'\Users\a\Local State')"));
+    assert!(script.contains(r#"vssadmin.exe" delete shadows /shadow="$id""#));
+    assert!(script.contains("'ok'|Set-Content"));
+}
+
+#[test]
+fn local_import_requires_a_logged_in_session() {
+    assert!(session("sessionid_ss=1; uid_tt=2".into()).is_ok());
+    assert_eq!(session("uid_tt=2".into()).unwrap_err(), NOT_LOGGED_IN);
+    assert_eq!(session("sessionid_ss=1".into()).unwrap_err(), NOT_LOGGED_IN);
 }
