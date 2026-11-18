@@ -2086,7 +2086,7 @@ impl App {
                         }
                         // 添加邮箱：一次性的长表单放进弹窗，页面上只保留账号列表。
                         let form_id=egui::Id::new("settings-mail-add");
-                        if add_mail {self.mail.form.open=true;}
+                        if add_mail {self.mail.form.open=true;self.mail.note.clear();}
                         if self.mail.form.open {
                             let mut close=false;
                             let modal=egui::Modal::new(form_id).frame(settings_modal_frame(ctx)).backdrop_color(Color32::from_black_alpha(110)).show(ctx,|ui|{
@@ -2177,6 +2177,12 @@ impl App {
                                     }
                                 }
                             });
+                            // 测试连接、保存与浏览器登录的提示必须画在弹窗里：写在背后的账号列表会被遮罩挡住，等于没提示。
+                            if !self.mail.note.is_empty(){
+                                let failed=self.mail.note.contains("失败")||self.mail.note.contains("无法")||self.mail.note.contains("请先")||self.mail.note.contains("意外");
+                                let color=if failed{settings_color(ctx,Color32::from_rgb(240,96,96),Color32::from_rgb(184,34,34))}else{settings_color(ctx,Color32::from_gray(200),Color32::from_gray(55))};
+                                ui.add(egui::Label::new(egui::RichText::new(&self.mail.note).size(12.0).color(color)).wrap());
+                            }
                             ui.label(egui::RichText::new(if microsoft{"登录凭据（refresh token）保存在 Windows 凭据管理器中。"}else{"授权码存储在 Windows 凭据管理器中。"}).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             ui.label(egui::RichText::new("图片中的验证码请在邮箱查看。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             });

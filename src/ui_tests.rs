@@ -5680,6 +5680,75 @@ fn mail_microsoft_custom_host_is_guided_to_browser_sign_in(){
 }
 
 #[test]
+fn mail_test_result_appears_inside_the_add_dialog(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.open_mail_settings();h.ctx.set_embed_viewports(false);h.app.mail.accounts.clear();
+    let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+    let events=std::sync::Arc::new(Mutex::new(Vec::new()));let input=events.clone();
+    egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+        let id=viewport.ids.this;
+        let raw=egui::RawInput{viewport_id:id,focused:true,events:std::mem::take(&mut *input.lock().unwrap()),
+            screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1300.0))),
+            viewports:std::iter::once((id,egui::ViewportInfo::default())).collect(),..Default::default()};
+        *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+    });
+    h.app.mail.form.provider=crate::mail::Provider::Qq;
+    h.app.mail.form.email="wish0930@foxmail.com".into();
+    h.app.mail.form.password="code".into();
+    h.app.mail.note.clear();
+    for _ in 0..3{let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));}
+    let child=output.lock().unwrap().take().unwrap();
+    let point=child.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()=="测试连接"=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap();
+    for pressed in [true,false]{
+        *events.lock().unwrap()=vec![egui::Event::PointerMoved(point),egui::Event::PointerButton{pos:point,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}];
+        let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
+    }
+    assert!(h.app.mail.form.open,"点测试连接不应关掉弹窗");
+    assert!(h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::MailTest(..))),"点测试连接应真的发出测试请求");
+    // 提示必须落在弹窗里：在「测试连接」按钮下方、弹窗最后一行说明上方，且与说明左对齐。
+    let inside_dialog=|shapes:&[egui::epaint::ClippedShape],note:&str|{
+        let button=shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()=="测试连接"=>Some(t.visual_bounding_rect()),_=>None}).expect("弹窗里应有测试连接按钮");
+        let hint=shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()=="图片中的验证码请在邮箱查看。"=>Some(t.visual_bounding_rect()),_=>None}).expect("弹窗里应有最后一行说明");
+        shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==note=>Some(t.visual_bounding_rect()),_=>None}).any(|rect|rect.min.y>button.max.y-1.0&&rect.max.y<hint.min.y+1.0&&(rect.min.x-hint.min.x).abs()<1.5)
+    };
+    let testing="wish0930@foxmail.com：正在测试连接…";
+    assert_eq!(h.app.mail.note,testing);
+    let child=output.lock().unwrap().take().unwrap();
+    assert!(inside_dialog(&child.shapes,testing),"测试中的提示要显示在添加邮箱弹窗内，不能被遮罩挡住");
+    // 后台测试回来后的结果同样要留在弹窗里。
+    h.app.mail.testing=None;h.app.mail.note="wish0930@foxmail.com：连接成功".into();
+    let _=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
+    let child=output.lock().unwrap().take().unwrap();
+    assert!(inside_dialog(&child.shapes,"wish0930@foxmail.com：连接成功"),"测试结果要显示在添加邮箱弹窗内");
+}
+
+#[test]
+#[ignore="按需导出添加邮箱弹窗里显示测试结果的画面"]
+fn mail_add_dialog_test_result_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_MAIL_GALLERY_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();h.app.open_mail_settings();h.ctx.set_embed_viewports(false);h.app.mail.accounts.clear();
+    h.app.mail.form.provider=crate::mail::Provider::Qq;
+    h.app.mail.form.email="wish0930@foxmail.com".into();
+    h.app.mail.note="wish0930@foxmail.com：连接失败——IMAP 登录被拒绝（AuthFailed），请检查授权码是否过期".into();
+    let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+    egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+        let id=viewport.ids.this;let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,1300.0))),
+            viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.5),..Default::default()})).collect(),..Default::default()};
+        *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+    });
+    let mut raster=crate::preview_raster::Raster::new(1035,1950);
+    for frame in 0..4{
+        let root=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));raster.update_textures(&root.textures_delta);
+        let child=output.lock().unwrap().take().unwrap();raster.update_textures(&child.textures_delta);
+        if frame==3{
+            raster.buf.fill([0.08,0.08,0.09,1.0]);raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
+            let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join("mail-add-dialog-test-result.png"),&rgba,1035,1950,image::ColorType::Rgba8).unwrap();
+        }raster.free_textures(&child.textures_delta);
+    }
+}
+
+#[test]
 #[ignore="按需导出微软邮箱登录页的实际画面"]
 fn mail_microsoft_settings_gallery(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
