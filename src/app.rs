@@ -1093,6 +1093,12 @@ impl App {
         safe
     }
 
+    /// 这封邮件是否带着验证码或验证链接（决定要不要自动弹出邮件页）。
+    fn mail_is_verification(item:&mail::Item) -> bool {
+        item.code.is_some()
+            || crate::mail::verify_link(&item.subject, item.summary.as_ref(), &item.links).is_some()
+    }
+
     /// 收信服务推来的事件；历史邮件静默，新邮件进入通知队列。
     pub fn mail_event(&mut self, ev: mail::Event) {
         let watching=|email:&str|self.mail_active() && self.mail.accounts.iter().any(|a|a.enabled && a.email.eq_ignore_ascii_case(email));
@@ -1123,10 +1129,26 @@ impl App {
                 if new{self.mail.manage.next_refresh=0.0;}
                 self.mail.privacy.retain(self.mail.recent.iter().chain(&self.mail.manage.trash).chain(&self.mail.reading));
                 if new && self.mail_active() {
-                    let item=&self.mail.recent[0];
-                    let body=format!("{} · {}",item.from,item.subject);
-                    let body=item.code.as_ref().map(|code|crate::mail_privacy::mask(&body,code)).unwrap_or(body);
-                    self.alert("新邮件",body,5,false);
+                    // 收到验证码或验证链接：按设置自动切到邮件页，让卡片直接出现在岛上。
+                    let body = {
+                        let item = &self.mail.recent[0];
+                        let body = format!("{} · {}", item.from, item.subject);
+                        let masked = item
+                            .code
+                            .as_ref()
+                            .map(|code| crate::mail_privacy::mask(&body, code))
+                            .unwrap_or_else(|| body.clone());
+                        (masked, Self::mail_is_verification(item))
+                    };
+                    let opened = body.1
+                        && self.settings.mail_auto_open
+                        && self.settings.mail_code
+                        && self.settings.visible_pages[5];
+                    if opened {
+                        self.show_page(5);
+                    } else {
+                        self.alert("新邮件", body.0, 5, false);
+                    }
                     self.notification_bell_at = self.t;
                     self.notification_bell_until = self.t + 6.0;
                 }

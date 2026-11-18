@@ -1770,6 +1770,10 @@ impl App {
                             ui.separator();
                             setting_row(ui,"验证码高亮","识别到验证码时在岛上放大显示，点击即复制",&mut self.settings.mail_code);
                             ui.separator();
+                            ui.add_enabled_ui(self.settings.mail_code,|ui|{
+                                setting_row(ui,"验证时自动弹出邮件","收到验证码或验证链接时，岛仔自动切到邮件页并展开，点击即可复制或打开链接",&mut self.settings.mail_auto_open);
+                            });
+                            ui.separator();
                             setting_choices(ui,"验证码隐藏",&mut self.settings.mail_code_hide_seconds,&[(30,"30 秒"),(60,"60 秒"),(300,"300 秒")]);
                             ui.label("默认 60 秒。明确有效时长更短时提前隐藏；历史邮件默认隐藏。隐藏不代表失效，主动查看后 15 秒再次隐藏。");
                             setting_choices(ui,"检查间隔",&mut self.settings.mail_interval,&[(10,"实时"),(60,"60 秒"),(120,"120 秒"),(300,"300 秒")]);

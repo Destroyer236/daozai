@@ -5210,6 +5210,44 @@ fn mail_verification_link_stays_off_ordinary_mail(){
 }
 
 #[test]
+fn verification_mail_pops_the_mail_page_and_can_be_switched_off(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let verification=|code:Option<&str>,links:Vec<crate::mail::Link>|crate::mail::Item {received_unix: None, account:"a@qq.com".into(),from:"Z.ai".into(),subject:"邮箱验证".into(),time:"09:41".into(),code:code.map(Into::into),html: String::new().into(),
+        summary:"请点击下方按钮验证您的电子邮箱地址。".into(),links,meeting:None,uid:7};
+    for auto in [true,false] {
+        for link_mail in [false,true] {
+            let mut h=H::new();
+            h.app.settings.mail_enabled=true;h.app.settings.mail_code=true;h.app.settings.mail_auto_open=auto;
+            h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+            let links=if link_mail{vec![crate::mail::Link{label:"验证邮箱".into(),url:"https://z.ai/verify?token=abc".into()}]}else{vec![]};
+            h.app.mail_event(crate::mail::Event::Mail{item:verification((!link_mail).then_some("482913"),links),new:true});
+            if auto {
+                assert_eq!(h.app.page,5,"验证邮件到达应自动切到邮件页（auto={auto} link={link_mail}）");
+                assert!(h.app.open,"自动弹出要求岛是展开的");
+                assert!(h.app.notice.is_none(),"已经自动弹出时不再叠一条重复提醒");
+                assert!(h.app.alerts.is_empty(),"自动弹出时不再排一条新邮件提醒");
+            } else {
+                assert_ne!(h.app.page,5,"关掉自动弹出后停留在原来的页面");
+                assert!(!h.app.alerts.is_empty(),"关掉自动弹出时仍保留新邮件提醒");
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_mail_never_pops_the_mail_page(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.mail_enabled=true;h.app.settings.mail_code=true;h.app.settings.mail_auto_open=true;
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+    h.app.mail_event(crate::mail::Event::Mail{item:crate::mail::Item {received_unix: None, account:"a@qq.com".into(),from:"产品团队".into(),subject:"本周更新".into(),time:"09:41".into(),code:None,html: String::new().into(),
+        summary:"这周上线了三个新功能，详情见文档。".into(),
+        links:vec![crate::mail::Link{label:"查看文档".into(),url:"https://example.com/docs".into()}],meeting:None,uid:7},new:true});
+    assert_ne!(h.app.page,5,"普通邮件不能抢页面");
+    assert!(!h.app.alerts.is_empty(),"普通邮件依旧按新邮件提醒展示");
+}
+
+#[test]
 fn adding_a_todo_saves_content_then_offers_an_optional_reminder() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for remind in [false,true] {
