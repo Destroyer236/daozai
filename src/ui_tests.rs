@@ -9054,3 +9054,23 @@ fn every_module_settings_tab_maps_to_its_page(){
     }
     pages.sort();assert_eq!(pages,(0..crate::app::PAGE_NAMES.len()).collect::<Vec<_>>(),"每个功能页面各有一个设置分页");
 }
+
+#[test]
+#[ignore="按需导出两步验证空状态的实际画面"]
+fn twofa_empty_state_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_TWOFA_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();h.app.twofa.accounts.clear();
+    let ppp=2.0f32;let (w,ht)=(PW,crate::app::TWOFA_H);
+    let mut raster=crate::preview_raster::Raster::new((w*ppp) as usize,(ht*ppp) as usize);
+    let mut rgba=Vec::new();
+    for frame in 0..3 {
+        let env=Env{t:frame as f64/60.0,clock:"09:41:00".into(),today:"2026-11-18".into(),date:"11月18日 周三".into(),battery:h.power.0,charging:h.power.1,media:h.media.clone(),bt_ready:true,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,ht))),time:Some(frame as f64/60.0),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+        let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let clip=ui.max_rect();let card=crate::paint::Card::new(ui,clip.min,clip);card.fill(0.0,0.0,w,ht,18.0,crate::theme::CARD);let mut cmds=Vec::new();h.app.page_twofa(&card,&env,&mut cmds);});});
+        raster.update_textures(&output.textures_delta);
+        if frame==2 {raster.buf.fill([0.09,0.11,0.18,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);raster.to_rgba8(&mut rgba);}
+        raster.free_textures(&output.textures_delta);
+    }
+    image::save_buffer(dest.join("twofa-page.png"),&rgba,(w*ppp) as u32,(ht*ppp) as u32,image::ColorType::Rgba8).unwrap();
+}

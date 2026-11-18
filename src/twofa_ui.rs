@@ -17,10 +17,12 @@ const ROW_GAP: f32 = 6.0;
 impl App {
     pub(crate) fn page_twofa(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         if self.twofa.accounts.is_empty() {
-            c.text(42.0, 60.0, "还没有两步验证账号", 13.0, W::Bold, theme::WHITE, H::Left);
-            c.text(42.0, 78.0, "添加后在这里查看 6 位动态码，点击即复制", 10.5, W::Regular, theme::GRAY, H::Left);
-            let (go, gc) = capsule(c, 42.0, 90.0, 92.0, 26.0, "twofa-setup", theme::BTN, theme::BTN_HOVER);
-            gc.text(56.0, 107.0, "添加账号", 11.0, W::Regular, theme::WHITE, H::Left);
+            // 空状态整块居中：文字与按钮都按面板中线摆放，垂直方向落在标题栏下方区域的中部。
+            let center = crate::app::PW / 2.0;
+            c.text(center, 95.0, "还没有两步验证账号", 13.0, W::Bold, theme::WHITE, H::Center);
+            c.text(center, 113.0, "添加后在这里查看 6 位动态码，点击即复制", 10.5, W::Regular, theme::GRAY, H::Center);
+            let (go, gc) = capsule(c, center - 46.0, 127.0, 92.0, 26.0, "twofa-setup", theme::BTN, theme::BTN_HOVER);
+            gc.centered_text(center, 140.0, "添加账号", 11.0, W::Regular, theme::WHITE, H::Center);
             if go.clicked() {
                 self.settings_tab = TWOFA_SETTINGS_TAB;
                 self.open_settings();
