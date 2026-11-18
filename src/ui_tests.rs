@@ -6391,6 +6391,31 @@ fn exporting_mail_accounts_needs_one_confirmation_then_writes_the_file() {
 }
 
 #[test]
+fn outlook_only_accounts_have_no_export_button_and_say_so() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings_tab=7;
+    h.app.mail.accounts.push(crate::mail::Account{email:"wish0930@outlook.com".into(),provider:crate::mail::Provider::Microsoft,custom:None,enabled:true});
+    h.app.open_settings();h.ctx.set_embed_viewports(false);
+    let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+    egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+        let id=viewport.ids.this;
+        let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,900.0))),
+            viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),focused:Some(true),..Default::default()})).collect(),
+            focused:true,..Default::default()};
+        *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+    });
+    let mut texts=Vec::new();
+    for _ in 0..3{
+        let _=h.ctx.run(egui::RawInput::default(),|ctx|h.app.settings_ui(ctx,false));
+        let shapes=output.lock().unwrap().take().unwrap().shapes;
+        texts=shapes.iter().filter_map(|shape|match &shape.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect();
+    }
+    assert!(!texts.iter().any(|t|t=="导出邮箱与授权码"),"Outlook 用浏览器登录、本机没有授权码，不该给导出按钮");
+    assert!(texts.iter().any(|t|t.contains("都用浏览器登录，本机没有授权码，不需要导出")),"要说明为什么不需要导出");
+    assert!(h.app.pending.is_empty(),"没有导出按钮，就不该产生任何落盘动作");
+}
+
+#[test]
 #[ignore = "按需导出关于页支持作者预览"]
 fn about_support_preview() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());

@@ -2008,18 +2008,25 @@ impl App {
                                 });
                             }
                             // 导出含明文授权码，先让用户确认一步，再写文件并定位到资源管理器。
+                            // Outlook / Hotmail 用浏览器登录，本机只有 refresh token、没有授权码，不参与导出。
                             if !self.mail.accounts.is_empty(){
                                 ui.separator();
                                 let confirm_id=ui.make_persistent_id("mail-export-confirm");
                                 let result_id=ui.make_persistent_id("mail-export-result");
                                 let confirming=ui.data(|d|d.get_temp::<bool>(confirm_id)).unwrap_or(false);
-                                if !confirming{
+                                let exportable=crate::mail::exportable(&self.mail.accounts).len();
+                                let skipped=self.mail.accounts.len()-exportable;
+                                if exportable==0{
+                                    ui.label(egui::RichText::new(format!("这 {skipped} 个邮箱都用浏览器登录，本机没有授权码，不需要导出")).size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
+                                }else if !confirming{
                                     ui.horizontal_wrapped(|ui|{
                                         if ui.button("导出邮箱与授权码").clicked(){ui.data_mut(|d|d.insert_temp(confirm_id,true));}
-                                        ui.label(egui::RichText::new("导出为文本文件，保存在数据目录的 exports 文件夹").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
+                                        let note=if skipped>0{format!("导出为文本文件，保存在数据目录的 exports 文件夹；{skipped} 个 Outlook / Hotmail 无授权码，不导出")}else{"导出为文本文件，保存在数据目录的 exports 文件夹".to_string()};
+                                        ui.label(egui::RichText::new(note).size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
                                     });
                                 }else{
-                                    ui.label(egui::RichText::new(format!("将把 {} 个邮箱的授权码以明文写入本机文件，确认导出？",self.mail.accounts.len())).size(12.0).color(settings_color(ctx,Color32::from_rgb(235,180,90),Color32::from_rgb(150,90,20))));
+                                    let warning=if skipped>0{format!("将把 {exportable} 个邮箱的授权码以明文写入本机文件（跳过 {skipped} 个 Outlook / Hotmail），确认导出？")}else{format!("将把 {exportable} 个邮箱的授权码以明文写入本机文件，确认导出？")};
+                                    ui.label(egui::RichText::new(warning).size(12.0).color(settings_color(ctx,Color32::from_rgb(235,180,90),Color32::from_rgb(150,90,20))));
                                     ui.horizontal(|ui|{
                                         if ui.button("确认导出").clicked(){
                                             let report=crate::mail::export(&self.mail.accounts);
@@ -2027,7 +2034,8 @@ impl App {
                                             match report{
                                                 Ok(export)=>{
                                                     let missing=if export.missing>0{format!("，{} 个未取到授权码",export.missing)}else{String::new()};
-                                                    ui.data_mut(|d|d.insert_temp(result_id,(format!("已导出 {} 个邮箱{missing}：{}",export.accounts,export.path.display()),self.t)));
+                                                    let skipped=if export.skipped>0{format!("，跳过 {} 个浏览器登录账号",export.skipped)}else{String::new()};
+                                                    ui.data_mut(|d|d.insert_temp(result_id,(format!("已导出 {} 个邮箱{missing}{skipped}：{}",export.accounts,export.path.display()),self.t)));
                                                     self.pending.push(Cmd::Reveal(export.path));
                                                 }
                                                 Err(error)=>{ui.data_mut(|d|d.insert_temp(result_id,(format!("导出失败：{error}"),self.t)));}

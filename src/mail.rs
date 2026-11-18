@@ -190,18 +190,26 @@ impl Account {
     }
 }
 
-/// 一键导出的结果：文件位置、账号数量、以及本机没有授权码的数量。
-pub struct Export { pub path: std::path::PathBuf, pub accounts: usize, pub missing: usize }
+/// 一键导出的结果：文件位置、账号数量、本机没有授权码的数量，以及跳过的浏览器登录账号。
+pub struct Export { pub path: std::path::PathBuf, pub accounts: usize, pub missing: usize, pub skipped: usize }
 
 fn cell(value: &str) -> String {
     value.chars().map(|c| if matches!(c, '\t' | '\r' | '\n') { ' ' } else { c }).collect()
 }
 
+/// 只有用授权码直连的邮箱才有可备份的「授权码」。Outlook / Hotmail 走浏览器登录，
+/// 凭据是系统凭据管理器里的 refresh token，既不是授权码，也不该被写进明文文件。
+pub fn exportable(accounts: &[Account]) -> Vec<Account> {
+    accounts.iter().filter(|account| !account.uses_oauth()).cloned().collect()
+}
+
 /// 导出文本（制表符分隔，带表头说明）。`codes` 与 `accounts` 一一对应，Err 表示本机取不到授权码。
-pub fn export_text(accounts: &[Account], codes: &[Result<String, String>], at: &str) -> String {
+/// `skipped` 是被排除在导出之外的浏览器登录账号数量。
+pub fn export_text(accounts: &[Account], codes: &[Result<String, String>], at: &str, skipped: usize) -> String {
     let missing = codes.iter().filter(|code| code.is_err()).count();
+    let skipped_note = if skipped > 0 { format!("；已跳过 {skipped} 个 Outlook / Hotmail，浏览器登录没有授权码") } else { String::new() };
     let mut out = format!(
-        "岛仔邮箱账号导出\n时间：{at}\n账号：{} 个（其中 {missing} 个本机没有保存授权码）\n\n\
+        "岛仔邮箱账号导出\n时间：{at}\n账号：{} 个（其中 {missing} 个本机没有保存授权码{skipped_note}）\n\n\
          注意：本文件含邮箱授权码明文，等同密码。只用于本机备份或迁移，不要上传网盘、发到聊天或截图分享；用完建议删除。\n\n\
          邮箱\t类型\tIMAP 服务器\t端口\t登录名\t授权码\t启用\n",
         accounts.len()
@@ -225,12 +233,17 @@ pub fn export_text(accounts: &[Account], codes: &[Result<String, String>], at: &
     out
 }
 
-/// 把全部邮箱与授权码写进数据目录的 `exports` 文件夹；返回文件位置供界面定位。
+/// 把可导出邮箱的授权码写进数据目录的 `exports` 文件夹；返回文件位置供界面定位。
+/// Outlook / Hotmail 用浏览器登录，本机没有授权码，直接跳过（也不会去读它的 refresh token）。
 pub fn export(accounts: &[Account]) -> Result<Export, String> {
-    if accounts.is_empty() { return Err("还没有可导出的邮箱".into()); }
-    let codes: Vec<Result<String, String>> = accounts.iter().map(|account| secrets::load(&account.credential_key())).collect();
+    let skipped = accounts.iter().filter(|account| account.uses_oauth()).count();
+    let list = exportable(accounts);
+    if list.is_empty() {
+        return Err(if skipped > 0 { "Outlook / Hotmail 用浏览器登录，本机没有授权码，不需要导出".into() } else { "还没有可导出的邮箱".into() });
+    }
+    let codes: Vec<Result<String, String>> = list.iter().map(|account| secrets::load(&account.credential_key())).collect();
     let at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-    let body = export_text(accounts, &codes, &at);
+    let body = export_text(&list, &codes, &at, skipped);
     let dir = crate::model::config_dir().join("exports");
     std::fs::create_dir_all(&dir).map_err(|_| "无法创建导出目录".to_string())?;
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
@@ -243,7 +256,7 @@ pub fn export(accounts: &[Account]) -> Result<Export, String> {
     // BOM 让 Excel 直接按 UTF-8 打开中文表头。
     let body = format!("\u{feff}{body}");
     crate::model::atomic_write(&path, body.as_bytes()).map_err(|_| "无法写入导出文件".to_string())?;
-    Ok(Export { path, accounts: accounts.len(), missing: codes.iter().filter(|code| code.is_err()).count() })
+    Ok(Export { path, accounts: list.len(), missing: codes.iter().filter(|code| code.is_err()).count(), skipped })
 }
 
 pub fn key(account: &Account) -> String {
@@ -1470,7 +1483,7 @@ mod service {
                 Account{email:"b@example.com".into(),provider:Provider::Custom,custom:Some(CustomImap{host:"imap.example.com".into(),port:993,username:"b-user".into()}),enabled:false},
             ];
             let codes=vec![Ok("abcd1234".to_string()),Err("没有保存授权码".to_string())];
-            let text=export_text(&accounts,&codes,"2026-11-13 21:50");
+            let text=export_text(&accounts,&codes,"2026-11-13 21:50",0);
             assert!(text.starts_with("岛仔邮箱账号导出\n时间：2026-11-13 21:50\n账号：2 个（其中 1 个本机没有保存授权码）"),"表头应写明导出时间与缺码数量");
             assert!(text.contains("本文件含邮箱授权码明文"),"导出前要警告这是明文凭据");
             assert!(text.contains("邮箱\t类型\tIMAP 服务器\t端口\t登录名\t授权码\t启用"));
@@ -1484,10 +1497,26 @@ mod service {
                 Account{email:"a\tb@example.com".into(),provider:Provider::Custom,custom:Some(CustomImap{host:"imap.example.com".into(),port:993,username:"user\nname".into()}),enabled:true},
             ];
             let codes=vec![Ok("code\twith\ttabs".to_string())];
-            let text=export_text(&accounts,&codes,"2026-11-13 21:50");
+            let text=export_text(&accounts,&codes,"2026-11-13 21:50",0);
             let row=text.lines().last().unwrap();
             assert_eq!(row.split('\t').count(),7,"邮箱或授权码里的制表符不能撑出多余的列");
             assert!(row.contains("code with tabs"));
+        }
+
+        #[test]
+        fn outlook_accounts_have_no_auth_code_so_export_skips_them() {
+            let accounts=vec![
+                Account{email:"me@outlook.com".into(),provider:Provider::Microsoft,custom:None,enabled:true},
+                Account{email:"me@foxmail.com".into(),provider:Provider::Qq,custom:None,enabled:true},
+            ];
+            let list=exportable(&accounts);
+            assert_eq!(list.len(),1,"Outlook / Hotmail 没有授权码，不参与导出");
+            assert_eq!(list[0].email,"me@foxmail.com");
+            let codes=vec![Ok("qq-code".to_string())];
+            let text=export_text(&list,&codes,"2026-11-18 22:40",1);
+            assert!(text.contains("账号：1 个（其中 0 个本机没有保存授权码；已跳过 1 个 Outlook / Hotmail，浏览器登录没有授权码）"),"表头要说清跳过了几个浏览器登录账号");
+            assert!(!text.contains("me@outlook.com"),"导出文件里不能出现 Outlook 账号，更不能把 refresh token 当授权码写出来");
+            assert!(text.contains("me@foxmail.com\tQQ 邮箱"));
         }
 
         #[test]
