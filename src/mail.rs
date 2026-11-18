@@ -393,6 +393,67 @@ pub fn links_of(parsed:&Parsed)->Vec<Link> {
     links
 }
 
+/// 邮件里最像「点一下就完成验证」的链接。
+///
+/// 只有验证类邮件（主题或正文开头出现验证 / 确认 / 激活）才继续挑；链接标签或地址
+/// 必须带验证含义，退订、隐私政策、帮助之类的页脚链接一律不认——宁可漏，不可错。
+pub fn verify_link(subject: &str, summary: &str, links: &[Link]) -> Option<String> {
+    use std::sync::OnceLock;
+    static CTX:OnceLock<regex::Regex>=OnceLock::new();
+    static STRONG:OnceLock<regex::Regex>=OnceLock::new();
+    static GENERIC:OnceLock<regex::Regex>=OnceLock::new();
+    static HINT:OnceLock<regex::Regex>=OnceLock::new();
+    static SKIP:OnceLock<regex::Regex>=OnceLock::new();
+    let ctx=CTX.get_or_init(||regex::Regex::new(concat!(
+        r"(?i)验证邮箱|驗證郵箱|验证您的邮箱|验证你的邮箱|验证地址|确认邮箱|確認郵箱|确认您的邮箱|",
+        r"激活账号|激活帳號|激活您的账号|邮箱验证|郵箱驗證|验证码|驗證碼|",
+        r"verify\s+(?:your\s+)?e-?mail|confirm\s+(?:your\s+)?e-?mail|",
+        r"activate\s+(?:your\s+)?account|verify\s+(?:your\s+)?account|verification"
+    )).unwrap());
+    let strong=STRONG.get_or_init(||regex::Regex::new(concat!(
+        r"(?i)验证邮箱|驗證郵箱|验证地址|验证您的邮箱|验证你的邮箱|确认邮箱|確認郵箱|确认您的邮箱|确认地址|激活账号|激活帳號|完成验证|立即验证|点击验证|",
+        r"verify\s+(?:your\s+)?e-?mail|confirm\s+(?:your\s+)?e-?mail|activate\s+(?:your\s+)?account|",
+        r"complete\s+(?:the\s+)?verification|verify\s+(?:your\s+)?account|click\s+to\s+verify|verify\s+address|confirm\s+address"
+    )).unwrap());
+    let generic=GENERIC.get_or_init(||regex::Regex::new(r"(?i)验证|驗證|确认|確認|激活|verify|confirm|activate|validate").unwrap());
+    let hint=HINT.get_or_init(||regex::Regex::new(concat!(
+        r"(?i)verify|verification|confirmation|confirm|activation|activate|validate|",
+        r"email-?verif|magic|token=|code=|/auth/|signin|sign-in|register"
+    )).unwrap());
+    let skip=SKIP.get_or_init(||regex::Regex::new(concat!(
+        r"(?i)退订|退訂|取消订阅|unsubscribe|偏好|preferences|隐私|私隱|privacy|条款|條款|terms|",
+        r"政策|policy|帮助|幫助|help|support|客服|mailto:|javascript:|void\("
+    )).unwrap());
+    let head: String = summary.chars().take(800).collect();
+    if links.is_empty() || !(ctx.is_match(subject) || ctx.is_match(&head)) {
+        return None;
+    }
+    let mut best: Option<(i32, &Link)> = None;
+    for link in links {
+        let text = format!("{} {}", link.label, link.url);
+        if skip.is_match(&text) {
+            continue;
+        }
+        let mut score = if strong.is_match(&link.label) {
+            45
+        } else if generic.is_match(&link.label) {
+            25
+        } else {
+            0
+        };
+        if hint.is_match(&link.url) {
+            score += 20;
+        }
+        if score < 40 {
+            continue;
+        }
+        if best.is_none_or(|(top, _)| score > top) {
+            best = Some((score, link));
+        }
+    }
+    best.map(|(_, link)| link.url.clone())
+}
+
 /// 会议邀请里界面和提醒要用的字段。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Meeting {
@@ -1976,4 +2037,43 @@ mod custom_endpoint_tests {
   let a=account();let raw=encode_accounts(&[a.clone()]);assert_eq!(decode_accounts(&raw),vec![a]);
   let text=String::from_utf8(raw).unwrap();assert!(!text.contains("password"));assert!(!text.contains("secret"));
  }
+}
+
+#[cfg(test)]
+mod verify_link_tests {
+    use super::*;
+    fn link(label:&str,url:&str)->Link{Link{label:label.into(),url:url.into()}}
+
+    #[test]
+    fn verification_button_is_recognized(){
+        let links=[link("帮助中心","https://z.ai/help"),link("验证邮箱","https://z.ai/verify?token=abc123"),link("退订","https://z.ai/unsubscribe")];
+        assert_eq!(verify_link("Z.ai 邮箱验证","感谢您注册 Z.ai！请点击下方按钮验证您的电子邮箱地址。",&links).as_deref(),
+            Some("https://z.ai/verify?token=abc123"),"页脚链接不能抢走验证按钮");
+    }
+
+    #[test]
+    fn english_verification_mail_is_recognized(){
+        let links=[link("Privacy policy","https://example.com/privacy"),link("Verify email","https://example.com/confirm?token=xyz")];
+        assert_eq!(verify_link("Confirm your email","Click the button below to confirm your email address.",&links).as_deref(),
+            Some("https://example.com/confirm?token=xyz"));
+        assert_eq!(verify_link("Weekly digest","Read the latest posts.",&[link("Read more","https://example.com/blog")]),None,
+            "普通邮件里的链接不能当验证链接");
+    }
+
+    #[test]
+    fn plain_text_url_without_label_still_counts(){
+        let links=[link("https://example.com/verify?token=1","https://example.com/verify?token=1")];
+        assert_eq!(verify_link("请验证您的邮箱","点击链接完成验证：https://example.com/verify?token=1",&links).as_deref(),
+            Some("https://example.com/verify?token=1"));
+    }
+
+    #[test]
+    fn unrelated_mail_and_unsubscribe_links_are_ignored(){
+        for (subject,summary) in [("本周更新","看看这周的新功能"),("订单确认","您的订单已确认，合计 129 元")]{
+            assert_eq!(verify_link(subject,summary,&[link("查看详情","https://shop.example.com/order/1")]),None,"{subject}");
+        }
+        assert_eq!(verify_link("验证您的邮箱","请验证您的邮箱",&[link("退订","https://example.com/verify/unsubscribe")]),None,
+            "退订链接即使地址里带 verify 也不能当验证链接");
+        assert_eq!(verify_link("验证您的邮箱","请验证您的邮箱",&[]),None,"没有链接就什么都不给");
+    }
 }

@@ -1052,6 +1052,11 @@ impl App {
         self.toast_below = true;
     }
 
+    pub(crate) fn verify_link_opened(&mut self) {
+        self.say("已在浏览器打开验证链接");
+        self.toast_below = true;
+    }
+
     pub(crate) fn mail_code_hidden(&self,item:&mail::Item)->bool {
         self.mail.privacy.hidden(item,self.t,self.settings.mail_code_hide_seconds)
     }

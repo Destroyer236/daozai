@@ -5162,6 +5162,54 @@ fn code_copy_confirmation_stays_below_the_island_and_does_not_capture_hover() {
 }
 
 #[test]
+fn mail_verification_link_shows_a_card_and_opens_the_browser(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+    h.app.mail.recent=vec![crate::mail::Item {received_unix: None, account:"a@qq.com".into(),from:"Z.ai".into(),subject:"邮箱验证".into(),time:"09:41".into(),code:None,html: String::new().into(),
+        summary:"感谢您注册 Z.ai！请点击下方按钮验证您的电子邮箱地址。".into(),
+        links:vec![crate::mail::Link{label:"验证邮箱".into(),url:"https://z.ai/verify?token=abc".into()}],meeting:None,uid:42}];
+    h.app.settings.mail_code=true;
+    h.app.show_page(5);h.hover(H::local(300.0,60.0),4.2);
+    let texts:Vec<String>=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect();
+    assert!(texts.iter().any(|t|t=="验证链接"),"没有验证码的验证邮件要显示验证链接卡片：{texts:?}");
+    assert!(texts.iter().any(|t|t=="点开完成验证"));
+    let card=h.shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Text(text)if text.galley.text()=="点开完成验证"=>Some(text.visual_bounding_rect()),_=>None}).expect("验证链接卡片应有可点的入口");
+    h.click(card.center());
+    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::OpenUrl(url) if url=="https://z.ai/verify?token=abc")),"点击卡片应交给默认浏览器打开验证链接");
+}
+
+#[test]
+#[ignore="按需导出验证链接卡片的实际画面"]
+fn mail_verification_link_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_MAIL_LINK_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    let mut h=H::new();
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+    h.app.mail.recent=vec![crate::mail::Item {received_unix: None, account:"a@qq.com".into(),from:"Z.ai".into(),subject:"邮箱验证".into(),time:"11-18 19:05".into(),code:None,html: String::new().into(),
+        summary:"感谢您注册 Z.ai！请点击下方按钮验证您的电子邮箱地址。".into(),
+        links:vec![crate::mail::Link{label:"验证邮箱".into(),url:"https://z.ai/verify?token=abc".into()}],meeting:None,uid:42}];
+    h.app.settings.mail_code=true;h.app.show_page(5);
+    let mut r=feature_raster();
+    shoot_feature(&mut h,&mut r,&dest,"mail-link-card",90,Some(H::local(120.0,60.0)),"2026-11-18");
+}
+
+#[test]
+fn mail_verification_link_stays_off_ordinary_mail(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+    h.app.mail.recent=vec![crate::mail::Item {received_unix: None, account:"a@qq.com".into(),from:"产品团队".into(),subject:"本周更新".into(),time:"09:41".into(),code:None,html: String::new().into(),
+        summary:"这周上线了三个新功能，详情见文档。".into(),
+        links:vec![crate::mail::Link{label:"查看文档".into(),url:"https://example.com/docs".into()}],meeting:None,uid:42}];
+    h.app.settings.mail_code=true;
+    h.app.show_page(5);h.hover(H::local(300.0,60.0),4.2);
+    let texts:Vec<String>=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect();
+    assert!(!texts.iter().any(|t|t.contains("验证链接")),"普通邮件不能显示验证链接卡片：{texts:?}");
+    assert!(h.cmds.iter().all(|cmd|!matches!(cmd,crate::app::Cmd::OpenUrl(_))));
+}
+
+#[test]
 fn adding_a_todo_saves_content_then_offers_an_optional_reminder() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for remind in [false,true] {

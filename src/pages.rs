@@ -1054,8 +1054,17 @@ impl App {
     fn visible_mail_code(&self)->Option<&mail::Item> {
         self.mail.code_item().filter(|item|!self.mail.manage.trash_open && self.settings.mail_code && !self.mail_code_hidden(item))
     }
+    /// 没有验证码、但正文里带「点一下完成验证」链接的邮件；同样只在最近几封里找。
+    fn visible_mail_link(&self)->Option<(&mail::Item,String)> {
+        if self.mail.manage.trash_open || !self.settings.mail_code {return None;}
+        self.mail.recent.iter().take(5).find_map(|item|{
+            if item.code.is_some(){return None;}
+            let url=crate::mail::verify_link(&item.subject,item.summary.as_ref(),&item.links)?;
+            Some((item,url))
+        })
+    }
     pub(crate) fn mail_list_bounds(&self)->Rect {
-        let left=if self.visible_mail_code().is_some(){182.0}else{36.0};
+        let left=if self.visible_mail_code().is_some()||self.visible_mail_link().is_some(){182.0}else{36.0};
         Rect::from_min_max(Pos2::new(left,54.0),Pos2::new(380.0,122.0))
     }
     pub(crate) fn page_mail(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
@@ -1087,7 +1096,23 @@ impl App {
             }
         }
         let code=self.visible_mail_code().cloned();
-        if let Some(raw)=&code {
+        let link=if code.is_some(){None}else{self.visible_mail_link().map(|(item,url)|(item.clone(),url))};
+        if let Some((raw,url))=&link {
+            // 验证链接卡片：只有链接、没有验证码的邮件走这里，点一下直接交给默认浏览器。
+            c.fill(36.0,36.0,140.0,86.0,11.0,theme::CARD);
+            let item=self.display_mail(raw);
+            c.text(46.0,51.0,"验证链接",10.5,W::Regular,theme::GRAY,H::Left);
+            c.text(166.0,51.0,&c.fit(&item.from,10.5,W::Semibold,78.0),10.5,W::Semibold,theme::WHITE,H::Right);
+            c.text(46.0,75.0,"点开完成验证",13.5,W::Bold,theme::BLUE,H::Left);
+            c.text(46.0,91.0,&c.fit(&item.subject,10.5,W::Regular,120.0),10.5,W::Regular,Color32::from_gray(190),H::Left);
+            c.text(46.0,108.0,"点击打开浏览器",10.5,W::Regular,theme::DIM,H::Left);
+            c.text(166.0,108.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,theme::GRAY,H::Right);
+            c.hit(42.0,38.0,128.0,16.0,"mail-link-source").on_hover_text(format!("来自：{}\n{}\n收件邮箱：{}\n{}\n{}",item.from,item.subject,item.account,item.time,url));
+            if c.hit(40.0,56.0,132.0,38.0,("mail-link",item.uid)).on_hover_text("在默认浏览器里打开这个验证链接").clicked(){
+                cmds.push(Cmd::OpenUrl(url.clone()));
+                self.verify_link_opened();
+            }
+        } else if let Some(raw)=&code {
             c.fill(36.0,36.0,140.0,86.0,11.0,theme::CARD);
             let hidden=self.mail_code_hidden(raw);
             let item=self.display_mail(raw);
@@ -1105,7 +1130,7 @@ impl App {
         use crate::mail_manage::{Action,Folder};
         let folder=self.mail.manage.folder();let trash=folder==Folder::Trash;
         let list_bounds=self.mail_list_bounds();let list_x=list_bounds.left();let row_w=list_bounds.width()-12.0;
-        let compact=code.is_none();let row_h=if compact{21.5}else{34.0};
+        let compact=code.is_none()&&link.is_none();let row_h=if compact{21.5}else{34.0};
         let all_count=self.mail.recent.len();
         let unread=self.mail.recent.iter().filter(|m|self.mail_seen(m,Folder::Inbox)==Some(false)).count();
         if trash{
@@ -1275,6 +1300,15 @@ impl App {
             if hit.clicked() {
                 cmds.push(Cmd::Copy(code.clone()));
                 self.code_copied(code);
+            }
+        } else if let Some(url) = crate::mail::verify_link(&item.subject, item.summary.as_ref(), &item.links) {
+            // 只有链接的验证邮件：点一下交给默认浏览器，不复制、不猜测。
+            let label = "验证链接 ↗";
+            let w = c.text(46.0, y, label, 12.0, W::Semibold, theme::BLUE, H::Left);
+            c.text(46.0 + w + 6.0, y, "点击打开浏览器", 10.5, W::Regular, theme::DIM, H::Left);
+            let hit = c.hit(42.0, y - 14.0, w + 66.0, 24.0, ("mail-detail-link", item.uid));
+            if hit.clicked() {
+                cmds.push(Cmd::OpenUrl(url));
             }
         }
     }
