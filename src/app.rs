@@ -862,6 +862,8 @@ pub struct App {
     pub(crate) pending: Vec<Cmd>,
     pub(crate) todo_first: usize,
     pub(crate) todo_choosing: bool,
+    /// 验证器页滚到第几条：一屏固定 3 行，滚轮逐行切换。
+    pub(crate) twofa_first: usize,
     pub(crate) pet: crate::pet::Pet,
     pub(crate) last_drink: Option<(u32, usize)>,
     // 其它
@@ -1017,7 +1019,7 @@ impl App {
             forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
-            todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
+            todo_first: 0, todo_choosing: false, twofa_first: 0, pet: Default::default(), last_drink: None,
             toast: None, toast_below: false,
             last_input: 0.0, system_idle: None,
             last_cursor: None,
@@ -2039,6 +2041,8 @@ impl App {
                                 =>Some((&mut self.clip_first,self.clipboard.lock().items.len().saturating_sub(crate::pages::CLIP_ROWS))),
                             3 if !clipboard_tab && Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
                                 =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
+                            TWOFA_PAGE if Rect::from_min_max(Pos2::new(38.0,30.0),Pos2::new(381.0,172.0)).contains(cursor)
+                                =>Some((&mut self.twofa_first,self.twofa.accounts.len().saturating_sub(3))),
                             _=>None,
                         };
                         let content_scrolls=list.as_ref().is_some_and(|(_,max)|*max>0);

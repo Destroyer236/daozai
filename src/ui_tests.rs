@@ -6634,6 +6634,35 @@ fn twofa_page_shows_the_current_code_and_clicking_copies_it() {
 }
 
 #[test]
+fn twofa_page_scrolls_beyond_three_accounts() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.t=5.0;
+    for (index,name) in ["GitHub","Google","Microsoft","AWS"].iter().enumerate() {
+        h.app.twofa.accounts.push(crate::twofa::Account{id:format!("totp-{index}"),issuer:(*name).into(),label:"zephyr".into()});
+        h.app.twofa.remember(&format!("totp-{index}"),"JBSWY3DPEHPK3PXP");
+    }
+    h.app.show_page(crate::app::TWOFA_PAGE);
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    let texts=|h:&H|->Vec<String>{h.shapes.iter().filter_map(|shape|match &shape.shape{
+        egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect()};
+    let shown=texts(&h);
+    assert!(shown.iter().any(|t|t=="Microsoft"),"首屏应显示前 3 个账号：{shown:?}");
+    assert!(!shown.iter().any(|t|t=="AWS"),"一屏只放 3 行，第 4 个不该直接出现");
+    assert!(shown.iter().any(|t|t=="共 4 个 · 滚轮切换 · 点击复制"),"账号多于 3 个时应提示滚轮：{shown:?}");
+    let wheel=|h:&mut H|h.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:egui::vec2(0.0,-60.0),modifiers:Default::default()}]);
+    h.hover(H::local(300.0,60.0),0.3);
+    wheel(&mut h);
+    assert_eq!(h.app.twofa_first,1,"鼠标停在列表上滚轮应换到第 2~4 行");
+    let scrolled=texts(&h);
+    assert!(scrolled.iter().any(|t|t=="AWS"),"滚动后应看到第 4 个账号：{scrolled:?}");
+    assert!(!scrolled.iter().any(|t|t=="GitHub"),"滚动后第 1 个账号应移出屏幕");
+    h.hover(H::local(300.0,60.0),0.3);
+    wheel(&mut h);
+    assert_eq!((h.app.twofa_first,h.app.page),(1,crate::app::TWOFA_PAGE),"滚到末尾应停住，不能翻到别的页");
+}
+
+#[test]
 fn twofa_time_bar_recedes_continuously_inside_a_second() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();

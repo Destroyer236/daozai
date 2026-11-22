@@ -1,6 +1,6 @@
 //! 验证器页面（岛内）与设置里的管理入口。
 //!
-//! 岛内一屏最多显示 3 条，点任意一行复制动态码；更多账号左下角提示去设置里管理。
+//! 岛内一屏显示 3 条，鼠标停在列表上滚轮逐行切换；点任意一行复制动态码，账号增删在设置里。
 //! 密钥不在岛内出现，也不写进任何配置文件。
 
 use crate::app::{App, Cmd, Env, TWOFA_H};
@@ -31,12 +31,16 @@ impl App {
         }
 
         let total = self.twofa.accounts.len();
-        let shown = total.min(3);
+        const ROWS: usize = 3;
+        // 一屏 3 行，超出的用滚轮换行；账号被删掉后把位置收回边界。
+        let first = self.twofa_first.min(total.saturating_sub(ROWS));
+        self.twofa_first = first;
+        let shown = (first + ROWS).min(total);
         // 动态码必须按真实时钟算，不能用 `env.t`（那是本次运行的秒数）。
         let at = self.twofa_clock.unwrap_or_else(crate::twofa::now);
-        for index in 0..shown {
+        for index in first..shown {
             let account = self.twofa.accounts[index].clone();
-            let y = 36.0 + index as f32 * (ROW_H + ROW_GAP);
+            let y = 36.0 + (index - first) as f32 * (ROW_H + ROW_GAP);
             let code = self.twofa.code(&account, at);
             c.fill(38.0, y, 343.0, ROW_H, 9.0, theme::CARD);
             let code_text = code.as_ref().ok().map(|code| crate::twofa::display(code));
@@ -68,17 +72,13 @@ impl App {
                 }
             }
         }
-        if total > shown {
-            let y = 36.0 + shown as f32 * (ROW_H + ROW_GAP) + 4.0;
-            let text = format!("另有 {} 个账号，点这里管理", total - shown);
-            c.text(42.0, y + 8.0, &text, 10.5, W::Regular, theme::DIM, H::Left);
-            if c.hit(38.0, y, 343.0, 16.0, "twofa-more").clicked() {
-                self.settings_tab = TWOFA_SETTINGS_TAB;
-                self.open_settings();
-            }
+        // 页脚常驻说明；账号多于 3 个时把「滚轮切换」写出来，避免看起来像被截断。
+        let footer = if total > ROWS {
+            format!("共 {total} 个 · 滚轮切换 · 点击复制")
         } else {
-            c.text(42.0, TWOFA_H - 10.0, "每 30 秒自动更新 · 点击复制", 10.0, W::Regular, theme::DIM, H::Left);
-        }
+            "每 30 秒自动更新 · 点击复制".to_string()
+        };
+        c.text(42.0, TWOFA_H - 10.0, &footer, 10.0, W::Regular, theme::DIM, H::Left);
     }
 
     pub(crate) fn twofa_settings(&mut self, ui: &mut egui::Ui) {
