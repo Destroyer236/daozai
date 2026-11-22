@@ -1399,6 +1399,10 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
     let options:Vec<(u32,&str)>=values.iter().zip(labels.iter()).map(|(v,l)|(*v,l.as_str())).collect();
     settings_control_row_right(ui,title,|ui|{settings_segmented(ui,value,&options,62.0);});
 }
+/// 带文字档位的分段选项（例如「实时」）。数值和标签分开给，方便一档不是一个整数。
+fn setting_choices_text(ui:&mut egui::Ui,title:&str,value:&mut u32,options:&[(u32,&str)],item_w:f32){
+    settings_control_row_right(ui,title,|ui|{settings_segmented(ui,value,options,item_w);});
+}
 /// 设置页分页序号。旧序号保持不变（岛上入口、测试都按序号跳转），新增外观与位置两页。
 pub(crate) const SETTINGS_TAB_APPEARANCE: usize = 13;
 pub(crate) const SETTINGS_TAB_POSITION: usize = 14;
@@ -1973,8 +1977,8 @@ impl App {
                             settings_advanced(ui,"settings-mail-advanced",|ui|{
                                 setting_choices(ui,"验证码隐藏",&mut self.settings.mail_code_hide_seconds,[15,60,300],"秒");
                                 settings_hint(ui,"验证码或验证链接卡片到点自动收起，岛体同时收回；邮件里写明更短有效期时提前隐藏。隐藏不代表失效，主动查看后 15 秒再次隐藏。");
-                                setting_choices(ui,"检查间隔",&mut self.settings.mail_interval,[60,120,300],"秒");
-                                settings_hint(ui,"支持推送的邮箱实时收信；间隔只用于不支持推送的邮箱。");
+                                setting_choices_text(ui,"检查间隔",&mut self.settings.mail_interval,&[(10,"实时"),(60,"60 秒"),(120,"120 秒"),(300,"300 秒")],56.0);
+                                settings_hint(ui,"支持推送的邮箱始终实时收信；「实时」每 10 秒检查一次，其余档位只用于不支持推送的邮箱。");
                             });
                         });
                         ui.horizontal(|ui|{

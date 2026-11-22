@@ -6421,6 +6421,52 @@ fn settings_theme_follows_system_and_preserves_island_style() {
 }
 
 #[test]
+fn mail_check_interval_offers_a_realtime_option() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings_tab=7;h.app.settings.mail_interval=120;
+    h.app.open_settings();h.ctx.set_embed_viewports(false);
+    fn draw(h:&mut H,events:Vec<egui::Event>)->Vec<egui::epaint::ClippedShape>{
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+            let id=viewport.ids.this;
+            let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(690.0,900.0))),
+                viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),focused:Some(true),..Default::default()})).collect(),
+                focused:true,events:events.clone(),..Default::default()};
+            *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
+        });
+        let _=h.ctx.run(egui::RawInput::default(),|ctx|h.app.settings_ui(ctx,false));
+        let shapes=output.lock().unwrap().take().unwrap().shapes;
+        shapes
+    }
+    let text_rect=|shapes:&[egui::epaint::ClippedShape],text:&str|shapes.iter().find_map(|shape|match &shape.shape{
+        egui::Shape::Text(t)if t.galley.text()==text=>Some(t.visual_bounding_rect()),_=>None,
+    }).unwrap_or_else(||panic!("设置里缺少文字 {text}"));
+    let click=|h:&mut H,pos:Pos2|{
+        let button=|pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
+        draw(h,vec![egui::Event::PointerMoved(pos),button(true)]);
+        draw(h,vec![button(false)]);
+    };
+    for _ in 0..3{draw(&mut h,vec![]);}
+    let advanced=text_rect(&draw(&mut h,vec![]),"高级").center();
+    click(&mut h,advanced);
+    let shapes=draw(&mut h,vec![]);
+    // 四个档位在默认窗口宽度下也要排在同一行：换行会让分段控件看起来断成两块。
+    // 「验证码隐藏」那行也有 60 / 300 秒，按同一行的纵坐标找，别拿到邻居行的同名文字。
+    let rects_of=|label:&str|->Vec<egui::Rect>{shapes.iter().filter_map(|shape|match &shape.shape{
+        egui::Shape::Text(t)if t.galley.text()==label=>Some(t.visual_bounding_rect()),_=>None,
+    }).collect()};
+    let realtime=rects_of("实时");
+    assert_eq!(realtime.len(),1,"检查间隔里应只有一个「实时」档");
+    let row=realtime[0].center().y;
+    for label in ["实时","60 秒","120 秒","300 秒"]{
+        assert!(rects_of(label).iter().any(|r|(r.center().y-row).abs()<1.0),"检查间隔的 {label} 不在同一行：{row} vs {:?}",rects_of(label));
+    }
+    let realtime=realtime[0].center();
+    click(&mut h,realtime);
+    assert_eq!(h.app.settings.mail_interval,10,"点「实时」应存 10 秒，由邮件线程按 10 秒轮询");
+}
+
+#[test]
 fn clicking_a_mail_address_in_settings_copies_it() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();h.app.settings_tab=7;
