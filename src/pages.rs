@@ -1057,11 +1057,12 @@ impl App {
     fn visible_mail_code(&self)->Option<&mail::Item> {
         self.mail.code_item().filter(|item|!self.mail.manage.trash_open && self.settings.mail_code && !self.mail_code_hidden(item))
     }
-    /// 没有验证码、但正文里带「点一下完成验证」链接的邮件；同样只在最近几封里找。
+    /// 没有验证码、但正文里带「点一下完成验证」链接的邮件；同样只在最近几封里找，
+    /// 并按与验证码相同的时长自动收起（到点后岛体一起收回）。
     fn visible_mail_link(&self)->Option<(&mail::Item,String)> {
         if self.mail.manage.trash_open || !self.settings.mail_code {return None;}
         self.mail.recent.iter().take(5).find_map(|item|{
-            if item.code.is_some(){return None;}
+            if item.code.is_some()||self.mail_link_hidden(item){return None;}
             let url=crate::mail::verify_link(&item.subject,item.summary.as_ref(),&item.links)?;
             Some((item,url))
         })

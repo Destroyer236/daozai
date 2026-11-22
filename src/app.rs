@@ -1076,6 +1076,10 @@ impl App {
     pub(crate) fn mail_code_hidden(&self,item:&mail::Item)->bool {
         self.mail.privacy.hidden(item,self.t,self.settings.mail_code_hide_seconds)
     }
+    /// 验证链接卡片与验证码同一个时长：到点自动收起，岛体同时收回。
+    pub(crate) fn mail_link_hidden(&self,item:&mail::Item)->bool {
+        self.mail.privacy.link_hidden(item,self.t,self.settings.mail_code_hide_seconds)
+    }
     pub(crate) fn reveal_mail_code(&mut self,item:&mail::Item){self.mail.privacy.reveal(item,self.t);}
     /// 同一封邮件、同一段正文只解析一次排版，避免每帧重复切分几百个段落。
     pub(crate) fn mail_body_lines(&mut self, item: &mail::Item) -> std::sync::Arc<Vec<crate::mail_format::Line>> {
@@ -1161,7 +1165,9 @@ impl App {
                         && self.settings.mail_code
                         && self.settings.visible_pages[5];
                     if opened {
-                        self.show_page(5);
+                        // 卡片停留多久，岛就展开多久：到点卡片和岛一起收回，不再一直挂着。
+                        let hold = self.settings.mail_code_hide_seconds.clamp(15, 300) as f64;
+                        self.show_page_for(5, hold);
                     } else {
                         self.alert("新邮件", body.0, 5, false);
                     }
@@ -1573,7 +1579,10 @@ impl App {
         self.system_idle.unwrap_or(self.t - self.last_input)
     }
 
-    pub fn show_page(&mut self,page:usize) {
+    pub fn show_page(&mut self,page:usize) { self.show_page_for(page,4.0); }
+
+    /// 展开到指定页并保持 `hold` 秒。验证码/验证链接卡片按设置的时长停留，到点自动收回。
+    pub(crate) fn show_page_for(&mut self,page:usize,hold:f64) {
         if !self.settings.visible_pages[page] {
             self.settings_tab=PAGE_SETTINGS_TABS[page];
             self.open_settings();
@@ -1581,7 +1590,7 @@ impl App {
         }
         self.notice=None;
         self.go(page,1.0);
-        self.open=true; self.forced_open_until=self.t+4.0;
+        self.open=true; self.forced_open_until=self.t+hold.max(1.0);
         self.w.tune(OPEN_W.0,OPEN_W.1);self.h.tune(OPEN_H.0,OPEN_H.1);
         self.w.target=PW;self.h.target=self.expanded_height();
     }

@@ -1971,8 +1971,8 @@ impl App {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{if ui.button("在日程中设置 ›").clicked(){self.settings_tab=8;}});
                             });
                             settings_advanced(ui,"settings-mail-advanced",|ui|{
-                                setting_choices(ui,"验证码隐藏",&mut self.settings.mail_code_hide_seconds,[30,60,300],"秒");
-                                settings_hint(ui,"明确有效时长更短时提前隐藏；隐藏不代表失效，主动查看后 15 秒再次隐藏。");
+                                setting_choices(ui,"验证码隐藏",&mut self.settings.mail_code_hide_seconds,[15,60,300],"秒");
+                                settings_hint(ui,"验证码或验证链接卡片到点自动收起，岛体同时收回；邮件里写明更短有效期时提前隐藏。隐藏不代表失效，主动查看后 15 秒再次隐藏。");
                                 setting_choices(ui,"检查间隔",&mut self.settings.mail_interval,[60,120,300],"秒");
                                 settings_hint(ui,"支持推送的邮箱实时收信；间隔只用于不支持推送的邮箱。");
                             });

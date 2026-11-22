@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::mail::Item;
 
 #[derive(Default)]
-pub(crate) struct Privacy { seen:HashMap<(String,u32,String),Seen>, revealed:HashMap<(String,u32,String),f64>, bodies:std::cell::RefCell<HashMap<(String,u32,String),(std::sync::Arc<str>,std::sync::Arc<str>)>> }
+pub(crate) struct Privacy { seen:HashMap<(String,u32,String),Seen>, revealed:HashMap<(String,u32,String),f64>, bodies:std::cell::RefCell<HashMap<(String,u32,String),(std::sync::Arc<str>,std::sync::Arc<str>)>>, links:std::cell::RefCell<HashMap<(String,u32),f64>> }
 struct Seen { at:f64, age:Option<u64>, new:bool, lifetime:Option<u64> }
 fn key(item:&Item)->(String,u32,String){(item.account.to_ascii_lowercase(),item.uid,item.code.clone().unwrap_or_default())}
 
@@ -56,10 +56,11 @@ impl Privacy {
         bodies.insert(k,(item.summary.clone(),masked.clone()));masked
     }
     pub fn observe(&mut self,item:&Item,new:bool,at:f64,unix:i64){
-        let Some(code)=&item.code else{return;};
+        // 没有验证码的验证邮件也要记：验证链接卡片和验证码用同一个停留时长。
+        let code=item.code.clone().unwrap_or_default();
         let seen=self.seen.entry(key(item)).or_insert_with(||Seen{
             at,new,age:item.received_unix.filter(|t|*t>0&&*t<=unix).map(|t|(unix-t) as u64),
-            lifetime:explicit_lifetime(&item.subject,&item.summary,code),
+            lifetime:explicit_lifetime(&item.subject,&item.summary,&code),
         });
         seen.new|=new;
     }
@@ -74,10 +75,25 @@ impl Privacy {
         s.age.unwrap_or(0) as f64+elapsed>=limit as f64
     }
     pub fn reveal(&mut self,item:&Item,now:f64){self.revealed.insert(key(item),now+15.0);}
+    /// 验证链接卡片（没有验证码的验证邮件）按同一时长自动收起：
+    /// 新邮件从到达算起；启动前就存在的邮件从第一次显示算起。
+    pub fn link_hidden(&self,item:&Item,now:f64,fallback:u32)->bool{
+        if item.code.is_some(){return false;}
+        let start=if let Some(seen)=self.seen.get(&key(item)).filter(|seen|seen.new){seen.at}else{
+            let id=(item.account.to_ascii_lowercase(),item.uid);
+            let mut links=self.links.borrow_mut();
+            if links.len()>=64{links.clear();}
+            *links.entry(id).or_insert(now)
+        };
+        now-start>=fallback.clamp(15,300) as f64
+    }
     pub fn retain<'a>(&mut self,items:impl IntoIterator<Item=&'a Item>){
-        let keys:std::collections::HashSet<_>=items.into_iter().filter(|i|i.code.is_some()).map(key).collect();
+        let all:Vec<&Item>=items.into_iter().collect();
+        let keys:std::collections::HashSet<_>=all.iter().filter(|i|i.code.is_some()).map(|i|key(i)).collect();
         self.seen.retain(|k,_|keys.contains(k));self.revealed.retain(|k,_|keys.contains(k));
         self.bodies.get_mut().retain(|k,_|keys.contains(k));
+        let ids:std::collections::HashSet<_>=all.iter().map(|i|(i.account.to_ascii_lowercase(),i.uid)).collect();
+        self.links.borrow_mut().retain(|k,_|ids.contains(k));
     }
 }
 
@@ -116,5 +132,21 @@ mod tests {
         for (text,code) in [("验证码 １２３４５６","123456"),("验证码 12\u{200b}3456","123456"),("验证码 123456","123 456"),("验证码 ＡＢＣ－１２３","ABC-123")] {
             assert_eq!(mask(text,code),"验证码 ••••••","归一化提取出的验证码必须遮住原文");
         }
+    }
+    #[test] fn verification_link_card_uses_the_same_timeout_as_codes(){
+        let mut i=item(); i.code=None; i.subject="验证邮箱".into(); i.summary="请点击下方按钮验证您的电子邮箱地址。".into();
+        let mut p=Privacy::default(); p.observe(&i,true,0.0,100);
+        assert!(!p.link_hidden(&i,14.0,15),"新邮件在时长内保留验证链接卡片");
+        assert!(p.link_hidden(&i,15.0,15),"到点应自动收起");
+        // 启动前就存在的邮件：从第一次显示开始计时
+        let mut p=Privacy::default(); p.observe(&i,false,0.0,100);
+        assert!(!p.link_hidden(&i,50.0,60));
+        assert!(!p.link_hidden(&i,109.0,60));
+        assert!(p.link_hidden(&i,110.0,60));
+        // 有验证码的邮件不走链接卡片；最长档位 300 秒照常生效
+        let c=item(); assert!(!p.link_hidden(&c,10_000.0,15));
+        let mut p=Privacy::default(); p.observe(&i,true,0.0,100);
+        assert!(!p.link_hidden(&i,299.0,300));
+        assert!(p.link_hidden(&i,300.0,300));
     }
 }

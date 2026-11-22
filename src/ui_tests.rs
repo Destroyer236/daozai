@@ -5379,6 +5379,43 @@ fn verification_mail_pops_the_mail_page_and_can_be_switched_off(){
 }
 
 #[test]
+fn verification_popup_retracts_after_the_configured_time(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for secs in [15u32,60]{
+        let mut h=H::new();
+        h.app.settings.mail_enabled=true;h.app.settings.mail_code=true;h.app.settings.mail_auto_open=true;h.app.settings.mail_code_hide_seconds=secs;
+        h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+        h.app.mail_event(crate::mail::Event::Mail{item:crate::mail::Item{received_unix:None,account:"a@qq.com".into(),from:"Z.ai".into(),subject:"邮箱验证".into(),time:"09:41".into(),code:Some("482913".into()),html:String::new().into(),summary:"验证码 482913".into(),links:vec![],meeting:None,uid:7},new:true});
+        assert_eq!(h.app.page,5,"验证邮件到达应弹出邮件页");
+        assert!(h.app.open,"卡片出现时岛是展开的");
+        let away=Pos2::new(600.0,WIN_H+30.0);
+        h.hover(away,secs as f64-1.0);
+        assert!(h.app.open,"{secs} 秒档位：时长没到不应提前收起");
+        h.hover(away,2.0);
+        assert!(!h.app.open,"{secs} 秒档位：到点应自动收回");
+    }
+}
+
+#[test]
+fn verification_link_card_hides_after_the_configured_time(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for secs in [15u32,60]{
+        let mut h=H::new();
+        h.app.settings.mail_enabled=true;h.app.settings.mail_code=true;h.app.settings.mail_auto_open=false;h.app.settings.mail_code_hide_seconds=secs;
+        h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"a@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+        h.app.mail_event(crate::mail::Event::Mail{item:crate::mail::Item{received_unix:None,account:"a@qq.com".into(),from:"Oxylabs".into(),subject:"邮箱验证".into(),time:"12:16".into(),code:None,html:String::new().into(),
+            summary:"请点击下方按钮验证您的电子邮箱地址。".into(),
+            links:vec![crate::mail::Link{label:"验证邮箱".into(),url:"https://oxylabs.io/verify?token=abc".into()}],meeting:None,uid:9},new:true});
+        h.app.show_page(5);
+        let card=|h:&H|h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="验证链接"));
+        h.hover(H::local(300.0,60.0),1.0);
+        assert!(card(&h),"{secs} 秒档位：新验证链接邮件应先显示卡片");
+        h.hover(H::local(300.0,60.0),secs as f64);
+        assert!(!card(&h),"{secs} 秒档位：到点后验证链接卡片应收起");
+    }
+}
+
+#[test]
 fn ordinary_mail_never_pops_the_mail_page(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();

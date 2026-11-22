@@ -415,7 +415,8 @@ impl Settings {
                 "mail_enabled" => s.mail_enabled = v != "0",
                 "mail_sync_operations" => s.mail_sync_operations=v=="1",
                 "mail_code" => s.mail_code = v != "0",
-                "mail_code_hide_seconds" => s.mail_code_hide_seconds=v.parse::<u32>().unwrap_or(60).clamp(15,300),
+                // 旧版的可选值是 30/60/300；时长档位改成 15/60/300 后，老配置里的 30 归到最短档。
+                "mail_code_hide_seconds" => s.mail_code_hide_seconds={let v=v.parse::<u32>().unwrap_or(60).clamp(15,300); if v==30{15}else{v}},
                 "mail_auto_open" => s.mail_auto_open=v!="0",
                 "mail_interval" => s.mail_interval = match v.parse::<u32>().unwrap_or(120) { 10 => 10, 60 => 60, 300 => 300, _ => 120 },
                 "ignored_mail_events" => s.ignored_mail_events = serde_json::from_str(&v).unwrap_or_default(),
