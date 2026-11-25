@@ -2,7 +2,7 @@
 //!
 //! 轻量化约束：只用 Rust 原生 crate（`imap` + `native-tls` + `mailparse`），
 //! 不引 Node/Go/Electron。凭据一律进 Windows 凭据管理器（`keyring`），
-//! 账号清单只存「邮箱 + 类型 + 是否监控」，不存密码。
+//! 账号清单只存账号配置，不存密码。
 //!
 //! 收信优先 `Session::idle()` 长连接；服务器不支持 IDLE 时退回轮询（实时 10 / 60 / 120 / 300 秒）。
 //! 正文只在内存里解析，不落盘、不缓存。
@@ -11,6 +11,12 @@ use std::collections::HashMap;
 #[cfg(windows)]
 #[path="mail_fetch.rs"]
 pub(crate) mod fetch;
+#[cfg(windows)]
+#[path="mail_proxy.rs"]
+mod mail_proxy;
+#[cfg(all(test, windows))]
+#[path="mail_proxy_routing_tests.rs"]
+mod proxy_routing_tests;
 
 pub const SERVICE: &str = "Daozai.Mail";
 /// 微软邮箱的登录说明：浏览器授权，不需要授权码。
@@ -147,6 +153,7 @@ pub struct Account {
     pub email: String,
     pub provider: Provider,
     pub custom: Option<CustomImap>,
+    pub use_windows_proxy: bool,
     /// 是否监控这个账号（设置里可逐个开关）。
     pub enabled: bool,
 }
@@ -155,6 +162,10 @@ pub struct Account {
 pub struct CustomImap { pub host:String, pub port:u16, pub username:String }
 impl Default for CustomImap {fn default()->Self{Self{host:String::new(),port:993,username:String::new()}}}
 impl Account {
+    fn uses_windows_proxy(&self) -> bool {
+        self.provider == Provider::Gmail && self.use_windows_proxy
+    }
+
     pub fn endpoint(&self)->Result<(String,u16,String),String>{
         // 微软云邮箱走 OAuth：主机固定，登录名就是邮箱地址。
         if self.provider==Provider::Microsoft {
@@ -274,7 +285,7 @@ pub fn load_accounts() -> Vec<Account> {
     }
 }
 
-/// 纯解析：账号清单里只有邮箱、类型、开关，没有任何密码字段。
+/// 账号清单没有密码字段。
 pub fn decode_accounts(raw: &[u8]) -> Vec<Account> {
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(raw) else {
         return Vec::new();
@@ -287,9 +298,11 @@ pub fn decode_accounts(raw: &[u8]) -> Vec<Account> {
             if email.is_empty() {
                 return None;
             }
+            let provider = Provider::parse(a.get("provider").and_then(|p| p.as_str()).unwrap_or("qq"));
             Some(Account {
                 custom:a.get("custom").and_then(|c|Some(CustomImap{host:c.get("host")?.as_str()?.into(),port:u16::try_from(c.get("port")?.as_u64()?).ok()?,username:c.get("username").and_then(|u|u.as_str()).unwrap_or("").into()})),
-                provider: Provider::parse(a.get("provider").and_then(|p| p.as_str()).unwrap_or("qq")),
+                provider,
+                use_windows_proxy: provider == Provider::Gmail && a.get("use_windows_proxy").and_then(|v| v.as_bool()).unwrap_or(false),
                 enabled: a.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
                 email,
             })
@@ -300,7 +313,11 @@ pub fn decode_accounts(raw: &[u8]) -> Vec<Account> {
 pub fn encode_accounts(items: &[Account]) -> Vec<u8> {
     let list: Vec<_> = items
         .iter()
-        .map(|a| serde_json::json!({"email": a.email, "provider": a.provider.key(), "enabled": a.enabled,"custom":a.custom.as_ref().map(|c|serde_json::json!({"host":c.host,"port":c.port,"username":c.username}))}))
+        .map(|a| {
+            let mut record = serde_json::json!({"email": a.email, "provider": a.provider.key(), "enabled": a.enabled,"custom":a.custom.as_ref().map(|c|serde_json::json!({"host":c.host,"port":c.port,"username":c.username}))});
+            if a.uses_windows_proxy() { record["use_windows_proxy"] = true.into(); }
+            record
+        })
         .collect();
     serde_json::to_vec(&list).unwrap_or_default()
 }
@@ -908,8 +925,11 @@ pub(crate) mod net {
             .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
             .build()
             .map_err(|e| format!("TLS 初始化失败：{e}"))?;
-        let tcp = TcpStream::connect((host.as_str(), port))
-            .map_err(|e| format!("无法连接 {host}：{e}"))?;
+        let tcp = if account.provider == super::Provider::Gmail {
+            super::mail_proxy::connect(&host, port, account.uses_windows_proxy())?
+        } else {
+            TcpStream::connect((host.as_str(), port)).map_err(|e| format!("无法连接 {host}：{e}"))?
+        };
         let timeout = Some(Duration::from_secs(20));
         let _ = tcp.set_read_timeout(timeout);
         let _ = tcp.set_write_timeout(timeout);
@@ -1251,6 +1271,7 @@ mod service {
             let mut session = match net::connect(&account, &password) {
                 Ok(s) => s,
                 Err(e) => {
+                    if stop.load(Ordering::Relaxed) { return; }
                     let _ = ev.send(Event::Status {
                         account: account.email.clone(),
                         status: Status::Failed(e),
@@ -1410,7 +1431,7 @@ mod service {
             (client.login("synthetic","synthetic").unwrap(),stop,server)
         }
 
-        fn account()->Account {Account{provider:Provider::Mail163,email:"test@163.com".into(),enabled:true,custom:None}}
+        fn account()->Account {Account{provider:Provider::Mail163,email:"test@163.com".into(),enabled:true,custom:None,use_windows_proxy:false}}
 
         #[test]
         fn polling_keepalives_do_not_fetch_until_the_configured_deadline(){
@@ -1479,8 +1500,8 @@ mod service {
         #[test]
         fn exported_accounts_text_lists_endpoint_and_missing_count() {
             let accounts=vec![
-                Account{email:"a@example.com".into(),provider:Provider::Mail126,custom:None,enabled:true},
-                Account{email:"b@example.com".into(),provider:Provider::Custom,custom:Some(CustomImap{host:"imap.example.com".into(),port:993,username:"b-user".into()}),enabled:false},
+                Account{email:"a@example.com".into(),provider:Provider::Mail126,custom:None,use_windows_proxy:false,enabled:true},
+                Account{email:"b@example.com".into(),provider:Provider::Custom,custom:Some(CustomImap{host:"imap.example.com".into(),port:993,username:"b-user".into()}),use_windows_proxy:false,enabled:false},
             ];
             let codes=vec![Ok("abcd1234".to_string()),Err("没有保存授权码".to_string())];
             let text=export_text(&accounts,&codes,"2026-11-13 21:50",0);
@@ -1494,7 +1515,7 @@ mod service {
         #[test]
         fn export_cells_cannot_break_the_columns() {
             let accounts=vec![
-                Account{email:"a\tb@example.com".into(),provider:Provider::Custom,custom:Some(CustomImap{host:"imap.example.com".into(),port:993,username:"user\nname".into()}),enabled:true},
+                Account{email:"a\tb@example.com".into(),provider:Provider::Custom,custom:Some(CustomImap{host:"imap.example.com".into(),port:993,username:"user\nname".into()}),use_windows_proxy:false,enabled:true},
             ];
             let codes=vec![Ok("code\twith\ttabs".to_string())];
             let text=export_text(&accounts,&codes,"2026-11-13 21:50",0);
@@ -1506,8 +1527,8 @@ mod service {
         #[test]
         fn outlook_accounts_have_no_auth_code_so_export_skips_them() {
             let accounts=vec![
-                Account{email:"me@outlook.com".into(),provider:Provider::Microsoft,custom:None,enabled:true},
-                Account{email:"me@foxmail.com".into(),provider:Provider::Qq,custom:None,enabled:true},
+                Account{email:"me@outlook.com".into(),provider:Provider::Microsoft,custom:None,use_windows_proxy:false,enabled:true},
+                Account{email:"me@foxmail.com".into(),provider:Provider::Qq,custom:None,use_windows_proxy:false,enabled:true},
             ];
             let list=exportable(&accounts);
             assert_eq!(list.len(),1,"Outlook / Hotmail 没有授权码，不参与导出");
@@ -1861,8 +1882,8 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
     #[test]
     fn accounts_roundtrip_without_secrets() {
         let items = vec![
-            Account { custom: None, email: "a@qq.com".into(), provider: Provider::Qq, enabled: true },
-            Account { custom: None, email: "b@163.com".into(), provider: Provider::Mail163, enabled: false },
+            Account { custom: None, email: "a@qq.com".into(), provider: Provider::Qq, enabled: true, use_windows_proxy: false },
+            Account { custom: None, email: "b@163.com".into(), provider: Provider::Mail163, enabled: false, use_windows_proxy: false },
         ];
         let bytes = encode_accounts(&items);
         assert_eq!(decode_accounts(&bytes), items);
@@ -1872,12 +1893,34 @@ Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
     }
 
     #[test]
+    fn gmail_proxy_setting_is_per_account_and_legacy_defaults_to_direct() {
+        let old_accounts = br#"[
+            {"email":"old@gmail.com","provider":"gmail"},
+            {"email":"work@gmail.com","provider":"gmail","enabled":false},
+            {"email":"old@qq.com","provider":"qq","use_windows_proxy":true}
+        ]"#;
+        let mut accounts = decode_accounts(old_accounts);
+        assert_eq!(accounts.len(), 3);
+        assert!(accounts.iter().all(|account| !account.use_windows_proxy));
+        let original_key = accounts[1].credential_key();
+        accounts[1].use_windows_proxy = true;
+        let encoded = encode_accounts(&accounts);
+        assert_eq!(decode_accounts(&encoded), accounts);
+        assert_eq!(accounts[1].credential_key(), original_key);
+        assert!(!accounts[1].enabled);
+        let encoded = serde_json::from_slice::<serde_json::Value>(&encoded).unwrap();
+        assert!(encoded[0].get("use_windows_proxy").is_none());
+        assert_eq!(encoded[1]["use_windows_proxy"].as_bool(), Some(true));
+        assert!(encoded[2].get("use_windows_proxy").is_none());
+    }
+
+    #[test]
     fn provider_presets_cover_six_kinds() {
         assert_eq!(Provider::ALL.len(), 8);
         assert_eq!(Provider::parse("gmail"), Provider::Gmail);
         assert_eq!(Provider::Gmail.host(), "imap.gmail.com");
         assert_eq!(Provider::Gmail.port(), 993);
-        let gmail=Account {custom: None, email:"demo@gmail.com".into(),provider:Provider::Gmail,enabled:true};
+        let gmail=Account {custom: None, email:"demo@gmail.com".into(),provider:Provider::Gmail,enabled:true,use_windows_proxy:false};
         assert_eq!(decode_accounts(&encode_accounts(&[gmail.clone()])),vec![gmail]);
         assert!(Provider::Mail163.needs_id() && Provider::Mail126.needs_id());
         assert!(!Provider::Qq.needs_id());
@@ -2032,7 +2075,7 @@ END:VCALENDAR\r\n";
 #[cfg(test)]
 mod custom_endpoint_tests {
  #[test] fn microsoft_accounts_use_browser_sign_in_and_refuse_password_paths(){
-  let a=Account{email:"test@hotmail.com".into(),provider:Provider::Microsoft,custom:None,enabled:true};
+  let a=Account{email:"test@hotmail.com".into(),provider:Provider::Microsoft,custom:None,enabled:true,use_windows_proxy:false};
   assert_eq!(a.endpoint().expect("微软邮箱应能连上"),("outlook.office365.com".into(),993,"test@hotmail.com".into()));
   assert!(a.uses_oauth(),"微软账号的凭据是 refresh token，登录必须走 XOAUTH2");
   assert!(Provider::Microsoft.label().contains("Outlook")&&!Provider::Microsoft.label().contains("暂不支持"));
@@ -2042,12 +2085,12 @@ mod custom_endpoint_tests {
    assert_eq!(b.endpoint().unwrap_err(),MICROSOFT_AS_PASSWORD,"自定义主机里的微软云也要引导用户去浏览器登录");
   }
   for email in ["user@outlook.com","user@hotmail.com","user@live.com"," USER@OUTLOOK.COM "]{
-   let b=Account{email:email.into(),provider:Provider::Qq,custom:None,enabled:true};
+   let b=Account{email:email.into(),provider:Provider::Qq,custom:None,enabled:true,use_windows_proxy:false};
    assert_eq!(b.endpoint().unwrap_err(),MICROSOFT_AS_PASSWORD,"误选服务商时不能引导用户尝试密码");
   }
  }
  use super::*;
- fn account()->Account{Account{email:"student@example.edu".into(),provider:Provider::Custom,enabled:true,custom:Some(CustomImap{host:"imap.example.edu".into(),port:993,username:"student-id".into()})}}
+ fn account()->Account{Account{email:"student@example.edu".into(),provider:Provider::Custom,enabled:true,use_windows_proxy:false,custom:Some(CustomImap{host:"imap.example.edu".into(),port:993,username:"student-id".into()})}}
  #[test] fn custom_requires_tls_hostname_and_clean_identity(){
   let a=account();assert_eq!(a.endpoint().unwrap(),("imap.example.edu".into(),993,"student-id".into()));
   for host in ["https://imap.example.edu","a/b","a:993","user@host","bad\\host","-bad.example",""]{let mut b=a.clone();b.custom.as_mut().unwrap().host=host.into();assert!(b.endpoint().is_err());}

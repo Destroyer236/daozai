@@ -142,7 +142,7 @@ fn percent(value:&Value)->Option<f64>{
 }
 fn snapshot(v:&Value,used:f64)->Snapshot{
     let(start,reset)=period(v);let seconds=start.zip(reset).and_then(|(a,b)|b.checked_sub(a)).filter(|n|*n>0);
-    Snapshot{kiro:None,relay:None,credits:None,wallet:None,plan:v["displayMessage"].as_str().unwrap_or_default().into(),at:chrono::Utc::now().timestamp(),
+    Snapshot{kiro:None,relay:None,credits:None,wallet:None,antigravity:None,plan:v["displayMessage"].as_str().unwrap_or_default().into(),at:chrono::Utc::now().timestamp(),
         windows:vec![Window{starts_on_use:false,label:super::cadence(seconds),seconds,remaining:(100.0-used).clamp(0.0,100.0) as f32,reset,amount:None}],extra:vec![]}
 }
 /// 解析 GetCurrentPeriodUsage：优先 total/api/auto 百分比，其次按 limit 与 remaining
