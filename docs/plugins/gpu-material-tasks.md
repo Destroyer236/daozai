@@ -8,7 +8,7 @@
 
 - 工作树：`D:\A-TangHao\REA\Windows小工具\01-专项工程\GPU材质`，分支 `feat/gpu-material`。只在这个工作树里改，不碰 `main` 和其他工作树。
 - PR #235 原始代码在分支 `test/pr235-liquid-glass`，用 `git show test/pr235-liquid-glass:<路径>` 阅读，或打开只读参考工作树 `D:\daozai-build\tmp\pr235-preview`。不要在参考工作树里改代码或提交。
-- 编译、测试遵守根目录 AGENTS.md：持 `Local\Daozai.Cargo` 锁排队，`CARGO_BUILD_JOBS=1`。release 编译需要 `RUST_MIN_STACK=67108864`。
+- 编译和测试遵守工作区根目录 `AGENTS.md`。release 编译需要 `RUST_MIN_STACK=67108864`。
 - 插件相关代码受 `sdk-js` 特性控制，检查和测试都加 `--features sdk-js`。材质相关新代码放在新的 `sdk-material` 特性后面，测试时两个特性一起开。
 - 设计稿里的接口（清单字段、`Frame` 布局、prelude 函数）是实验接口，本轮按现有内容实现。需要改动时先在回报里说明原因，不要自行改设计稿。
 - 每个阶段结束：跑完相关测试并提交。在最后一条回复里列出提交号、改动文件、测试命令和结果、没做完或有疑问的地方，交给审查。

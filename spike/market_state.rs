@@ -402,6 +402,7 @@ impl LocalPlugins {
                 source_refresh_seconds: None,
                 market_revoked: false,
                 status_page_disabled: false,
+                status_page_settings_hidden: false,
                 notice_history: NoticeHistory::default(),
             }
         };

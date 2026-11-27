@@ -4,7 +4,30 @@
 use crate::capture::{capture_channel, CaptureReceiver, CaptureSender, CaptureState};
 use crate::{renderer, RenderState, SurfaceErrorAction, WgpuConfiguration};
 use egui::{Context, Event, UserData, ViewportId, ViewportIdMap, ViewportIdSet};
-use std::{num::NonZeroU32, sync::Arc};
+use std::{
+    num::NonZeroU32,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
+
+static SURFACE_FAILURES: [AtomicUsize; 5] = [const { AtomicUsize::new(0) }; 5];
+static SKIPPED_FRAME_SUBMISSIONS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(all(windows, feature = "surface-test"))]
+mod surface_recovery_test;
+#[cfg(all(windows, feature = "surface-test"))]
+#[doc(hidden)]
+pub use surface_recovery_test::verify_dx12_surface_recovery;
+
+/// 取出采样期间的取帧失败计数（超时、过期、丢失、内存不足、其他）和跳帧提交次数。
+pub fn take_surface_failures() -> ([usize; 5], usize) {
+    (
+        std::array::from_fn(|i| SURFACE_FAILURES[i].swap(0, Ordering::Relaxed)),
+        SKIPPED_FRAME_SUBMISSIONS.swap(0, Ordering::Relaxed),
+    )
+}
 
 struct SurfaceState {
     surface: wgpu::Surface<'static>,
@@ -16,7 +39,7 @@ struct SurfaceState {
 }
 
 #[cfg(all(windows, feature = "direct-composition"))]
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::AtomicIsize;
 #[cfg(all(windows, feature = "direct-composition"))]
 use windows::Win32::Graphics::DirectComposition::IDCompositionDevice;
 
@@ -186,6 +209,8 @@ pub struct Painter {
 
     instance: wgpu::Instance,
     render_state: Option<RenderState>,
+    #[cfg(all(windows, feature = "surface-test"))]
+    surface_error_for_test: Option<wgpu::SurfaceError>,
     #[cfg(all(windows, feature = "direct-composition"))]
     direct_composition_error: Option<crate::WgpuError>,
 
@@ -232,6 +257,8 @@ impl Painter {
 
             instance,
             render_state: None,
+            #[cfg(all(windows, feature = "surface-test"))]
+            surface_error_for_test: None,
             #[cfg(all(windows, feature = "direct-composition"))]
             direct_composition_error: None,
 
@@ -668,38 +695,76 @@ impl Painter {
             profiling::scope!("get_current_texture");
             // This is what vsync-waiting happens on my Mac.
             let start = web_time::Instant::now();
+            #[cfg(all(windows, feature = "surface-test"))]
+            let output_frame = match self.surface_error_for_test.take() {
+                Some(error) => Err(error),
+                None => surface_state.surface.get_current_texture(),
+            };
+            #[cfg(not(all(windows, feature = "surface-test")))]
             let output_frame = surface_state.surface.get_current_texture();
             vsync_sec += start.elapsed().as_secs_f32();
             output_frame
         };
 
+        let free_textures = |state: &RenderState| {
+            let mut renderer = state.renderer.write();
+            for id in &textures_delta.free {
+                renderer.free_texture(id);
+            }
+        };
         let output_frame = match output_frame {
             Ok(frame) => frame,
-            #[cfg(all(windows, feature = "direct-composition"))]
-            Err(err) if surface_state.dcomp.is_some() => {
-                self.direct_composition_error = match err {
-                    wgpu::SurfaceError::Timeout => None,
-                    wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
-                        Self::configure_surface(surface_state, render_state, &self.configuration)
-                            .err()
-                    }
-                    error => Some(crate::WgpuError::DirectComposition(error.to_string())),
+            Err(err) => {
+                let kind = match err {
+                    wgpu::SurfaceError::Timeout => 0,
+                    wgpu::SurfaceError::Outdated => 1,
+                    wgpu::SurfaceError::Lost => 2,
+                    wgpu::SurfaceError::OutOfMemory => 3,
+                    wgpu::SurfaceError::Other => 4,
                 };
-                return vsync_sec;
-            }
-            Err(err) => match (*self.configuration.on_surface_error)(err) {
-                SurfaceErrorAction::RecreateSurface => {
+                SURFACE_FAILURES[kind].fetch_add(1, Ordering::Relaxed);
+
+                #[cfg(all(windows, feature = "direct-composition"))]
+                if surface_state.dcomp.is_some()
+                    && matches!(err, wgpu::SurfaceError::OutOfMemory | wgpu::SurfaceError::Other)
+                {
+                    self.direct_composition_error =
+                        Some(crate::WgpuError::DirectComposition(err.to_string()));
+                    return vsync_sec;
+                }
+
+                // 绘制已跳过，仍要提交纹理、顶点等已排队的上传，避免缓冲逐帧积压。
+                // 先丢弃绘制命令，再提交上传，最后处理本帧的纹理释放。
+                drop(user_cmd_bufs);
+                drop(encoder);
+                render_state.queue.submit([]);
+                SKIPPED_FRAME_SUBMISSIONS.fetch_add(1, Ordering::Relaxed);
+                free_textures(render_state);
+
+                #[cfg(all(windows, feature = "direct-composition"))]
+                if surface_state.dcomp.is_some() {
+                    self.direct_composition_error = match err {
+                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                            Self::configure_surface(surface_state, render_state, &self.configuration)
+                                .err()
+                        }
+                        _ => None,
+                    };
+                    return vsync_sec;
+                }
+
+                if matches!(
+                    (*self.configuration.on_surface_error)(err),
+                    SurfaceErrorAction::RecreateSurface
+                ) {
                     if let Err(error) =
                         Self::configure_surface(surface_state, render_state, &self.configuration)
                     {
                         log::warn!("{error}");
                     }
-                    return vsync_sec;
                 }
-                SurfaceErrorAction::SkipFrame => {
-                    return vsync_sec;
-                }
-            },
+                return vsync_sec;
+            }
         };
 
         let mut capture_buffer = None;
@@ -795,12 +860,7 @@ impl Painter {
         // Free textures marked for destruction **after** queue submit since they might still be used in the current frame.
         // Calling `wgpu::Texture::destroy` on a texture that is still in use would invalidate the command buffer(s) it is used in.
         // However, once we called `wgpu::Queue::submit`, it is up for wgpu to determine how long the underlying gpu resource has to live.
-        {
-            let mut renderer = render_state.renderer.write();
-            for id in &textures_delta.free {
-                renderer.free_texture(id);
-            }
-        }
+        free_textures(render_state);
 
         if let Some(capture_buffer) = capture_buffer {
             if let Some(screen_capture_state) = &mut self.screen_capture_state {

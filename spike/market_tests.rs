@@ -408,11 +408,21 @@ fn publish_wireless(root: &Path, version: &str, data_version: &str) -> Result<()
         "permissions": {},
         "settings": []
     });
+    let mut receivers = vec![json!({"vid": "046D", "pid": "C542", "name": "罗技 Nano 接收器"})];
+    if version != "1.0.0" {
+        receivers.push(json!({"vid": "373B", "pid": "10C9", "name": "VXE 蜻蜓 R1 无线接收器"}));
+    }
+    let api_version = if version == "1.1.0" {
+        receivers.push(json!({"vid": "3554", "pid": "F58A", "name": "VXE R1 系列无线接收器", "battery_protocol": "compx"}));
+        2
+    } else {
+        1
+    };
     let data = json!({
         "id": WIRELESS_PLUGIN_ID,
-        "api_version": 1,
+        "api_version": api_version,
         "version": data_version,
-        "receivers": [{"vid": "046D", "pid": "C542", "name": "罗技 Nano 接收器"}]
+        "receivers": receivers
     });
     fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
     fs::write(root.join("wireless-receivers.json"), serde_json::to_vec(&data)?)?;
@@ -443,6 +453,13 @@ impl LocalPlugins {
 
     pub(crate) fn test_uninstall_wireless_compat(&mut self) -> Result<()> {
         self.uninstall(WIRELESS_PLUGIN_ID, true)
+    }
+
+    pub(crate) fn test_market_update_wireless_compat(&mut self) -> Result<()> {
+        let root = self.dir.join("test-wireless-market");
+        publish_wireless(&root, "1.0.1", "1.0.1")?;
+        self.refresh_market_catalog()?;
+        apply_wireless_market_action(self)
     }
 }
 
@@ -485,6 +502,8 @@ fn market_installs_wireless_compatibility_as_a_resource_package() -> Result<()> 
     let record = &reopened.records[id];
     assert!(record.enabled);
     assert_eq!(record.package.as_ref().unwrap().manifest.version, "1.1.0");
+    let saved: serde_json::Value = serde_json::from_str(&record.package.as_ref().unwrap().source)?;
+    assert_eq!(saved["receivers"][2]["battery_protocol"], "compx");
     let wireless = reopened.wireless_store();
     assert_eq!(wireless.package().unwrap().version(), "1.1.0");
     reopened.uninstall(id, false)?;
@@ -613,33 +632,15 @@ fn wait_for_catalog_action(host: &mut LocalPlugins) {
 }
 
 #[test]
-fn online_market_material_is_limited_to_preview_or_the_reviewed_stable_package() -> Result<()> {
+fn online_market_material_requires_the_matching_official_channel() -> Result<()> {
     let preview = Url::parse(&format!("https://gitee.com{}?ref=master", official_index_path("preview")))?;
     let stable = Url::parse(&format!("https://gitee.com{}?ref=master", official_index_path("stable")))?;
-    let approved: Entry = serde_json::from_value(json!({
-        "id": "cayww.liquid-glass",
-        "name": "液态玻璃",
-        "author": "轻九九九（@cayww）",
-        "version": "1.0.2",
-        "size": 180301,
-        "sha256": "01619b45b3ba6cf0a71c8d952c8a2aada5fad25379ced21e481784d561d197d8",
-        "owner": "appearance"
-    }))?;
-    assert!(allows_market_material(None, false, &approved));
-    assert!(allows_market_material(Some(&preview), true, &approved));
-    assert!(!allows_market_material(Some(&preview), false, &approved));
-    assert!(allows_market_material(Some(&stable), false, &approved));
-    assert!(!allows_market_material(Some(&stable), true, &approved));
-
-    for unreviewed in [
-        Entry { id: "example.other-material".into(), ..approved.clone() },
-        Entry { version: "1.0.3".into(), ..approved.clone() },
-        Entry { sha256: "0".repeat(64), ..approved.clone() },
-        Entry { size: approved.size + 1, ..approved.clone() },
-    ] {
-        assert!(allows_market_material(Some(&preview), true, &unreviewed));
-        assert!(!allows_market_material(Some(&stable), false, &unreviewed));
-    }
+    assert!(allows_market_material(None, false));
+    assert!(allows_market_material(None, true));
+    assert!(allows_market_material(Some(&preview), true));
+    assert!(!allows_market_material(Some(&preview), false));
+    assert!(allows_market_material(Some(&stable), false));
+    assert!(!allows_market_material(Some(&stable), true));
 
     for (trusted, preview_build) in [(&preview, true), (&stable, false)] {
         for untrusted in [
@@ -651,9 +652,36 @@ fn online_market_material_is_limited_to_preview_or_the_reviewed_stable_package()
             trusted.as_str().replace("catalog.json", "alternate.json"),
         ] {
             let index = Url::parse(&untrusted)?;
-            assert!(!allows_market_material(Some(&index), preview_build, &approved), "{untrusted}");
+            assert!(!allows_market_material(Some(&index), preview_build), "{untrusted}");
         }
     }
+    Ok(())
+}
+
+#[cfg(all(windows, feature = "sdk-material"))]
+#[test]
+fn stable_market_accepts_another_wgsl_material() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let project = fixture.0.join("plugin.json");
+    let mut manifest: Value =
+        serde_json::from_str(include_str!("examples/liquid-glass/plugin.json"))?;
+    manifest["id"] = json!("example.other-material");
+    manifest["version"] = json!("2.1.0");
+    fs::write(&project, serde_json::to_vec(&manifest)?)?;
+    fs::write(
+        fixture.0.join("material.wgsl"),
+        "fn material(i : MaterialIn) -> vec4<f32> { return vec4<f32>(sample_backdrop(i.px), 1.0); }",
+    )?;
+    fs::write(fixture.0.join(COVER_FILE), include_bytes!("examples/liquid-glass/cover.png"))?;
+    let bundle = fixture.0.join("other-material.zip");
+    pack(&project, &bundle)?;
+    let raw = fs::read(&bundle)?;
+
+    let stable = Url::parse(&format!("https://gitee.com{}?ref=master", official_index_path("stable")))?;
+    let material = decode_zip(&raw, allows_market_material(Some(&stable), false))?;
+    assert!(material.manifest.is_material());
+    assert_eq!(material.manifest.id, "example.other-material");
+    assert_eq!(material.manifest.version, "2.1.0");
     Ok(())
 }
 
@@ -673,10 +701,10 @@ fn market_material_packs_and_installs_liquid_glass_locally() -> Result<()> {
     let catalog = Catalog::open(&catalog_path)?;
     let entry = &catalog.entries[0];
     let stable = Url::parse(&format!("https://gitee.com{}?ref=master", official_index_path("stable")))?;
-    let preview_package = decode_zip(&raw, allows_market_material(Some(&preview), true, entry))?;
+    let preview_package = decode_zip(&raw, allows_market_material(Some(&preview), true))?;
     assert!(preview_package.manifest.is_material());
     assert_eq!(preview_package.cover_png().as_deref(), Some(include_bytes!("examples/liquid-glass/cover.png").as_slice()));
-    assert!(decode_zip(&raw, allows_market_material(Some(&stable), false, entry)).is_err());
+    assert!(decode_zip(&raw, allows_market_material(Some(&stable), false))?.manifest.is_material());
     let id = "cayww.liquid-glass";
     assert_eq!(entry.id, id);
     assert_eq!(entry.author, "轻九九九（@cayww）");

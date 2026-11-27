@@ -255,7 +255,10 @@ fn quota_rings(c:&Card,x:f32,y:f32,size:f32,colors:[Color32;2],remaining:impl Ex
     for (i,value) in remaining.take(2).enumerate(){
         let r=radius-i as f32*(stroke+gap);
         let col=colors[i];let dark=crate::paint::mix(col,Color32::BLACK,0.8);
-        if value>=100.0{c.ring(x,y,r,stroke,col);}else if value<=0.0{c.ring(x,y,r,stroke,dark);}else{
+        if value>=100.0||value<=0.0{
+            let color=if value>=100.0{col}else{dark};
+            if dual{c.ring_centered(x,y,r,stroke,color);}else{c.ring(x,y,r,stroke,color);}
+        }else{
             let end=start+std::f32::consts::TAU*value/100.0;
             c.arc(x,y,r,end,start+std::f32::consts::TAU,stroke,dark);
             c.arc(x,y,r,start,end,stroke,col);
@@ -1201,6 +1204,45 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_double_ring_gap_stays_constant_when_one_ring_is_full_or_empty() {
+        let ctx = egui::Context::default();
+        ctx.tessellation_options_mut(|options| options.feathering = false);
+        let center = egui::pos2(50.0, 50.0);
+        let colors = [Color32::RED, Color32::GREEN];
+        for (size, expected) in [(27.0, 1.5), (70.0, 3.0)] {
+            for remaining in [[0.0, 50.0], [100.0, 50.0], [50.0, 0.0], [50.0, 100.0]] {
+                let output = ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                        let card = Card::new(ui, egui::Pos2::ZERO, ui.max_rect());
+                        quota_rings(&card, center.x, center.y, size, colors, remaining.into_iter());
+                    });
+                });
+                let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+                let bounds = |index: usize| {
+                    let color = colors[index];
+                    let color = if remaining[index] == 0.0 {
+                        crate::paint::mix(color, Color32::BLACK, 0.8)
+                    } else {
+                        color
+                    };
+                    primitives.iter().filter_map(|part| match &part.primitive {
+                        egui::epaint::Primitive::Mesh(mesh) => Some(&mesh.vertices),
+                        _ => None,
+                    }).flatten().filter(|vertex| {
+                        vertex.color == color && vertex.pos.x > center.x && (vertex.pos.y - center.y).abs() < 0.001
+                    }).map(|vertex| vertex.pos.x).fold(
+                        (f32::INFINITY, f32::NEG_INFINITY),
+                        |(min, max), x| (min.min(x), max.max(x)),
+                    )
+                };
+                let gap = bounds(0).0 - bounds(1).1;
+                assert!((gap - expected).abs() < 0.01, "环大小 {size}，剩余 {remaining:?}，间距 {gap}，应为 {expected}");
+            }
+        }
+    }
+
     #[test]
     fn kiro_pool_details_include_monthly_reset_and_overage_once(){
         let s=quota::parse(Provider::Kiro,&serde_json::json!({"userInfo":{"userId":"details-user"},"usageBreakdownList":[{"resourceType":"CREDIT","usageLimitWithPrecision":1000,"currentUsageWithPrecision":1080,"currentOveragesWithPrecision":80,"overageCapWithPrecision":200,"nextDateReset":1796083200_i64}],"overageConfiguration":{"overageStatus":"ENABLED"}})).unwrap();

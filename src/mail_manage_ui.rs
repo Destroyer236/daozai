@@ -7,8 +7,16 @@ fn identity(account:&Account)->String{
     let value=format!("{}:{}",account.provider.key(),account.credential_key());
     ring::digest::digest(&ring::digest::SHA256,value.as_bytes()).as_ref().iter().map(|b|format!("{b:02x}")).collect()
 }
+#[derive(Default)]
+pub(crate) struct MailView {
+    pub(crate) show_unread: bool,
+    pub(crate) start_date: Option<chrono::NaiveDate>,
+    pub(crate) aliases: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Default)]pub(crate) struct State{
     pub unread_only:bool,pub trash_open:bool,pub trash:Vec<Item>,
+    pub view_account: Option<(String, String)>,
     pub data:HashMap<(String,Folder),Snapshot>,pub identities:HashMap<String,Account>,pub pending:HashSet<String>,
     pub next_refresh:f64,pub message:String,pub errors:Vec<String>,
     pub auto_read:Option<(String,u32)>,pub reader_trash:bool,

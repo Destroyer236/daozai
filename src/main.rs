@@ -1012,7 +1012,8 @@ impl eframe::App for Shell {
             }
             let pill_hover=(!self.hidden && out.resident_clip.is_some()
                 && self.app.settings.island_shape==daozai::model::IslandShape::Pill).then_some(out.hit);
-            native.watch_collapsed_pill_edge(pill_hover,ppp,self.app.settings.dock);
+            let outside_hover_cursor=env.desktop_cursor.filter(|_| !self.hidden && out.watch_outside_hover);
+            native.watch_outside_hover(pill_hover,outside_hover_cursor,ppp,self.app.settings.dock);
             native_cost=native_start.elapsed();
             _frame.root_window_offset=native.paint_offset();
             native.set_page_scroll_area(out.page_scroll_area.filter(|_|!self.hidden && out.expanded),ppp);

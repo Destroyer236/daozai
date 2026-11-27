@@ -1231,21 +1231,25 @@ fn switch(ui:&mut egui::Ui,value:&mut bool)->bool {
 }
 /// 设置页版式：标签列宽、开关尺寸、控件与卡片右边缘之间的固定留白。
 pub(crate) const SETTINGS_LABEL_W: f32 = 80.0;
-const SETTINGS_SWITCH_W: f32 = 34.0;
+pub(crate) const SETTINGS_SWITCH_W: f32 = 34.0;
 const SETTINGS_ROW_GAP: f32 = 16.0;
+
+fn setting_row_text(ui:&mut egui::Ui,title:&str,description:&str,width:f32){
+    let ctx=&ui.ctx().clone();
+    ui.vertical(|ui|{
+        ui.set_width(width);
+        ui.spacing_mut().item_spacing.y=2.0;
+        ui.add(egui::Label::new(egui::RichText::new(title).size(13.0).color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41)))).wrap());
+        if !description.is_empty(){ui.add(egui::Label::new(egui::RichText::new(description).size(11.5).color(settings_color(ctx,Color32::from_gray(185),Color32::from_gray(82)))).wrap());}
+    });
+}
 
 /// 开关行：左侧标题 + 说明（宽度固定、自动换行），右侧开关，长说明也不会把开关挤出卡片。
 pub(crate) fn setting_row(ui:&mut egui::Ui,title:&str,description:&str,value:&mut bool){
-    let ctx=&ui.ctx().clone();
     ui.add_space(2.0);
     ui.horizontal(|ui|{
         let text_w=(ui.available_width()-SETTINGS_SWITCH_W-SETTINGS_ROW_GAP).max(120.0);
-        ui.vertical(|ui|{
-            ui.set_width(text_w);
-            ui.spacing_mut().item_spacing.y=2.0;
-            ui.add(egui::Label::new(egui::RichText::new(title).size(13.0).color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41)))).wrap());
-            if !description.is_empty(){ui.add(egui::Label::new(egui::RichText::new(description).size(11.5).color(settings_color(ctx,Color32::from_gray(185),Color32::from_gray(82)))).wrap());}
-        });
+        setting_row_text(ui,title,description,text_w);
         // add_space 之后还会再插入一次 item_spacing.x，这里一并扣掉，开关才不会每行往外挤一点。
         ui.add_space((ui.available_width()-SETTINGS_SWITCH_W-ui.spacing().item_spacing.x).max(0.0));
         switch(ui,value);
@@ -1258,6 +1262,17 @@ fn resident_setting_row(ui:&mut egui::Ui,title:&str,description:&str,module_on:b
     ui.add_enabled_ui(module_on,|ui|{
         setting_row(ui,title,if module_on {description}else{"功能页已关闭"},value);
     });
+}
+
+pub(crate) const PAGE_VISIBILITY_ACTION_WIDTH: f32 = 92.0;
+
+pub(crate) fn page_visibility_action(ui:&mut egui::Ui,on:bool,hidden:bool,can_disable:bool)->bool{
+    let label=if hidden {"显示入口"} else if on {"关闭并隐藏"} else {"隐藏入口"};
+    let response=ui.add_enabled_ui(can_disable,|ui|{
+        ui.add_sized([PAGE_VISIBILITY_ACTION_WIDTH,26.0],egui::Button::new(egui::RichText::new(label).size(12.0)).frame(false))
+    }).inner.on_disabled_hover_text("至少保留一个页面");
+    if response.clicked() {ui.ctx().request_repaint();}
+    response.clicked()
 }
 
 /// 设置页统一的分段选择器（灰色底框 + 选中块）。返回值为是否发生了切换。
@@ -1432,7 +1447,6 @@ fn paint_wireless_settings_icon(ui:&egui::Ui,rect:egui::Rect,icon:egui::ImageSou
 }
 
 /// 设置分页对应的功能模块（页面序号）；通用、外观、位置、消息提醒、关于、页面管理不属于任何模块。
-#[cfg_attr(not(test),allow(dead_code))]
 pub(crate) fn settings_tab_module(tab:usize)->Option<usize>{
     use crate::app::*;
     match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),12=>Some(WEATHER_PAGE),15=>Some(PERFORMANCE_PAGE),SETTINGS_TAB_WIRELESS=>Some(BLUETOOTH_PAGE),SETTINGS_TAB_TWOFA=>Some(TWOFA_PAGE),_=>None}
@@ -1730,6 +1744,10 @@ fn settings_sidebar_row(
 }
 
 impl App {
+    fn settings_group_visible(&self,start:usize,end:usize)->bool{
+        (start..=end).any(|tab|settings_tab_module(tab).is_none_or(|page|!self.settings.hidden_settings_pages[page]))
+    }
+
     fn settings_sidebar_builtin(
         &mut self, ui: &mut egui::Ui, (name, start, end): (&str, usize, usize),
         row_h: f32, row_gap: f32,
@@ -1866,7 +1884,7 @@ impl App {
             let plugin_pages: Vec<_> = self.plugins.standalone_settings_pages()
                 .map(|(id, name)| (id.to_owned(), name.to_owned())).collect();
             #[cfg(not(feature="sdk-js"))]
-            let plugin_pages: &[(&str, &str)] = &[];
+            let plugin_pages: &[(String, String)] = &[];
             #[cfg(feature="sdk-js")]
             if self.settings_tab == SETTINGS_TAB_PLUGIN_DETAIL
                 && !plugin_pages.iter().any(|(id, _)| self.settings_plugin.as_ref() == Some(id))
@@ -1876,41 +1894,74 @@ impl App {
             }
             egui::SidePanel::left("settings-sidebar").resizable(false).exact_width(180.0).frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(29,29,32),Color32::from_rgb(237,239,243))).stroke(egui::Stroke::NONE).inner_margin(egui::Margin::symmetric(10,12))).show(ctx,|ui|{
                 ui.add_space(2.0);
-                let per=(ui.available_height()-80.0)/(SETTINGS_GROUPS.len()+plugin_pages.len()) as f32;
+                let builtin_rows=SETTINGS_GROUPS.iter().filter(|&&(_,start,end,_)|self.settings_group_visible(start,end)).count();
+                #[cfg(feature="sdk-js")]
+                let plugin_rows=plugin_pages.iter().filter(|(id,_)|!self.plugins.status_page_settings_hidden(id)).count();
+                #[cfg(not(feature="sdk-js"))]
+                let plugin_rows=0;
+                let per=(ui.available_height()-80.0)/(builtin_rows+plugin_rows) as f32;
                 let row_h=(per-6.0).clamp(20.0,32.0);
                 let row_gap=(per-3.0-row_h).clamp(0.0,3.0);
                 let (main, bottom) = SETTINGS_GROUPS.split_at(SETTINGS_GROUPS.len()-SETTINGS_BOTTOM_ROWS);
+                let (general, features) = main.split_at(4);
+                let builtin_order = self.settings.page_order;
+                let plugin_order = self.settings.plugin_page_order.clone();
+                let order = crate::model::ordered_pages(&builtin_order, &plugin_order, plugin_pages.iter().map(|(id, _)| id.as_str()));
                 let footer_height = bottom.len() as f32*(row_h+row_gap+ui.spacing().item_spacing.y)+17.0;
                 let main_height = (ui.available_height()-footer_height).max(0.0);
                 egui::ScrollArea::vertical().id_salt("settings-sidebar-scroll").max_height(main_height)
                     .auto_shrink([false,false]).show(ui, |ui| {
-                        for &(name, start, end, section) in main {
-                            if !section.is_empty() {
-                                ui.add_space(if start == 0 { 2.0 } else { 8.0 });
-                                let color = settings_color(ui.ctx(), Color32::from_gray(150), Color32::from_gray(105));
-                                ui.label(egui::RichText::new(section).size(11.0).color(color));
-                                ui.add_space(3.0);
+                        let heading = |ui: &mut egui::Ui, label: &str, space| {
+                            ui.add_space(space);
+                            let color = settings_color(ui.ctx(), Color32::from_gray(150), Color32::from_gray(105));
+                            ui.label(egui::RichText::new(label).size(11.0).color(color));
+                            ui.add_space(3.0);
+                        };
+                        heading(ui, general[0].3, 2.0);
+                        for &(name, start, end, _) in general {
+                            if self.settings_group_visible(start,end) {
+                                self.settings_sidebar_builtin(ui, (name, start, end), row_h, row_gap);
                             }
-                            #[cfg(feature="sdk-js")]
-                            if section == "功能" {
-                                for (id, name) in &plugin_pages {
-                                    let selected = self.settings_tab == SETTINGS_TAB_PLUGIN_DETAIL
-                                        && self.settings_plugin.as_ref() == Some(id);
-                                    let icon = egui::include_image!("../assets/settings-icons/system/pages.svg");
-                                    let response = ui.push_id(("plugin-settings-sidebar", id), |ui| {
-                                        settings_sidebar_row(
-                                            ui, name, icon, row_h, selected, false,
-                                            self.plugins.navigation_icon(id),
-                                        ).on_hover_text(name)
-                                    }).inner;
-                                    if selected && focus_requested && !ui.clip_rect().contains_rect(response.rect) {
-                                        response.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        heading(ui, features[0].3, 8.0);
+                        let mut shown = std::collections::HashSet::new();
+                        for page in order {
+                            match page {
+                                crate::model::OrderedPage::Builtin(page) => {
+                                    // 消息提醒没有岛上页面，在邮箱入口前显示。
+                                    let tab = crate::app::PAGE_SETTINGS_TABS[page];
+                                    for &(name, start, end, _) in features.iter().filter(|&&(_, start, end, _)| {
+                                        (start..=end).contains(&tab) || (start == 6 && page == crate::app::MAIL_PAGE)
+                                    }) {
+                                        if shown.insert(start) {
+                                            if self.settings_group_visible(start,end) {
+                                                self.settings_sidebar_builtin(ui, (name, start, end), row_h, row_gap);
+                                            }
+                                        }
                                     }
-                                    if response.clicked() && !selected { self.open_plugin_settings(id); }
-                                    ui.add_space(row_gap);
+                                }
+                                crate::model::OrderedPage::Plugin(_plugin_id) => {
+                                    #[cfg(feature="sdk-js")]
+                                    {
+                                        let Some((id, name)) = plugin_pages.iter().find(|(id, _)| id == _plugin_id) else { continue; };
+                                        if self.plugins.status_page_settings_hidden(id) {continue;}
+                                        let selected = self.settings_tab == SETTINGS_TAB_PLUGIN_DETAIL
+                                            && self.settings_plugin.as_ref() == Some(id);
+                                        let icon = egui::include_image!("../assets/settings-icons/system/pages.svg");
+                                        let response = ui.push_id(("plugin-settings-sidebar", id), |ui| {
+                                            settings_sidebar_row(
+                                                ui, name, icon, row_h, selected, false,
+                                                self.plugins.navigation_icon(id),
+                                            ).on_hover_text(name)
+                                        }).inner;
+                                        if selected && focus_requested && !ui.clip_rect().contains_rect(response.rect) {
+                                            response.scroll_to_me(Some(egui::Align::Center));
+                                        }
+                                        if response.clicked() && !selected { self.open_plugin_settings(id); }
+                                        ui.add_space(row_gap);
+                                    }
                                 }
                             }
-                            self.settings_sidebar_builtin(ui, (name, start, end), row_h, row_gap);
                         }
                     });
                 ui.add_space(4.0);
@@ -1990,7 +2041,7 @@ impl App {
                     SETTINGS_TAB_WIRELESS=>{
                         let on=self.settings_feature_header(ui,crate::app::BLUETOOTH_PAGE,"查看蓝牙电量和 2.4G 接收器状态",|_,_|{});
                         #[cfg(all(windows,feature="sdk-js"))]
-                        self.plugins.wireless_settings(ui);
+                        self.plugins.wireless_settings(ui, &self.wireless_enhancement, on);
                         ui.add_enabled_ui(on,|ui|{
                             settings_label(ui,"岛上常驻");
                             settings_card(ui,|ui|{
@@ -2059,57 +2110,115 @@ impl App {
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
                             #[cfg(feature = "sdk-js")]
-                            if self.plugins.page_shortcut_settings(ui,&mut self.settings.show_page_shortcuts) {
+                            if self.plugins.page_shortcut_settings(ui,&mut self.settings.show_page_shortcuts,&mut self.settings.hide_page_arrows) {
                                 ui.separator();
                             }
                             let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝水与久坐提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","当地天气与七日预报","处理器、显卡、内存、网络与磁盘","蓝牙设备连接状态与多来源电量","两步验证动态码，点击复制"];
-                            ui.label(egui::RichText::new("拖动左侧手柄调整顺序；关闭的功能不在后台运行，不同步也不提醒，已有数据保留。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            settings_hint(ui,"拖动左侧手柄调整岛上顺序。关闭后暂停后台运行，保留已有数据。选择「关闭并隐藏」可从设置左栏收起入口，合并入口需隐藏组内所有功能。");
+                            use crate::model::OrderedPage;
                             #[derive(Clone)]
-                            struct PageDrag(usize);
+                            struct PageDrag(egui::Id);
+                            #[cfg(feature = "sdk-js")]
+                            let plugins: Vec<_> = self.plugins.status_page_preferences()
+                                .filter(|(_, _, enabled, _)| *enabled)
+                                .map(|(id, _, _, _)| id.to_owned()).collect();
+                            #[cfg(not(feature = "sdk-js"))]
+                            let plugins: Vec<String> = Vec::new();
+                            let builtin = self.settings.page_order;
+                            let saved_plugins = self.settings.plugin_page_order.clone();
+                            let mut order: Vec<_> = crate::model::ordered_pages(&builtin, &saved_plugins, plugins.iter().map(String::as_str)).collect();
+                            let rows: Vec<_> = order.iter().copied().enumerate().filter(|(_, page)| match page {
+                                OrderedPage::Builtin(_) => true,
+                                OrderedPage::Plugin(id) => plugins.iter().any(|installed| installed == id),
+                            }).collect();
+                            let drag_index = |payload: &PageDrag| rows.iter().find_map(|(index, page)| {
+                                (egui::Id::new(page) == payload.0).then_some(*index)
+                            });
                             let mut movement=None;
                             let mut jump=None;
                             let row_w=ui.available_width();
-                            for (index,page) in self.settings.page_order.into_iter().enumerate() {
-                                if index>0 {ui.separator();}
-                                let mut visible=self.settings.visible_pages[page];
-                                let can_change=!visible || self.settings.visible_pages.iter().filter(|enabled|**enabled).count()>1;
+                            for (row_index, &(index, page)) in rows.iter().enumerate() {
+                                if row_index > 0 {ui.separator();}
                                 let row=ui.push_id(("page-order",page),|ui|ui.horizontal(|ui|{
                                     ui.set_max_width(row_w);
                                     let (rect,handle)=ui.allocate_exact_size(egui::vec2(20.0,40.0),egui::Sense::drag());
                                     for x in [-3.0,3.0] {for y in [-6.0,0.0,6.0] {
                                         ui.painter().circle_filled(rect.center()+egui::vec2(x,y),1.4,settings_color(ctx,Color32::from_gray(155),Color32::from_gray(100)));
                                     }}
-                                    handle.on_hover_cursor(egui::CursorIcon::Grab).dnd_set_drag_payload(PageDrag(page));
-                                    // 每行右侧「设置 ›」直接跳到这个功能的设置页，开关仍在最右。
-                                    let jump_w=58.0;
-                                    ui.allocate_ui(egui::vec2((ui.available_width()-jump_w-ui.spacing().item_spacing.x).max(160.0),40.0),|ui|{
-                                        ui.add_enabled_ui(can_change,|ui|{setting_row(ui,PAGE_NAMES[page],descriptions[page],&mut visible);});
-                                    });
-                                    if ui.add_sized([jump_w,26.0],egui::Button::new(egui::RichText::new("设置 ›").size(12.0)).frame(false)).on_hover_text(format!("打开「{}」设置",PAGE_NAMES[page])).clicked(){jump=Some(crate::app::PAGE_SETTINGS_TABS[page]);}
+                                    handle.on_hover_cursor(egui::CursorIcon::Grab).dnd_set_drag_payload(PageDrag(egui::Id::new(page)));
+                                    match page {
+                                        OrderedPage::Builtin(page) => {
+                                            let mut visible=self.settings.visible_pages[page];
+                                            let hidden=self.settings.hidden_settings_pages[page];
+                                            let can_disable=!visible || self.settings.visible_pages.iter().filter(|enabled|**enabled).count()>1;
+                                            let jump_w=58.0;
+                                            let text_w=ui.available_width()-jump_w-SETTINGS_SWITCH_W-PAGE_VISIBILITY_ACTION_WIDTH-3.0*ui.spacing().item_spacing.x;
+                                            setting_row_text(ui,PAGE_NAMES[page],descriptions[page],text_w);
+                                            ui.add_enabled_ui(can_disable,|ui|switch(ui,&mut visible));
+                                            let change_hidden=page_visibility_action(ui,visible,hidden,can_disable);
+                                            if ui.add_sized([jump_w,26.0],egui::Button::new(egui::RichText::new("设置 ›").size(12.0)).frame(false)).on_hover_text(format!("打开「{}」设置",PAGE_NAMES[page])).clicked(){jump=Some(crate::app::PAGE_SETTINGS_TABS[page]);}
+                                            if change_hidden {
+                                                self.set_page_settings_hidden(page,!hidden);
+                                            } else if visible!=self.settings.visible_pages[page] {
+                                                self.set_page_visible(page,visible);
+                                                ctx.request_repaint();
+                                            }
+                                        }
+                                        OrderedPage::Plugin(_id) => {
+                                            #[cfg(feature="sdk-js")]
+                                            if let Some(route) = self.plugins.status_page_settings(ui, _id) {
+                                                self.apply_settings_navigation(route);
+                                            }
+                                        }
+                                    }
                                 })).inner.response;
-                                if let Some(payload)=row.dnd_hover_payload::<PageDrag>() {
-                                    if payload.0!=page {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                                        let y=if self.settings.page_order.iter().position(|p|*p==payload.0).unwrap()<index {row.rect.bottom()}else{row.rect.top()};
-                                        ui.painter().line_segment([egui::pos2(row.rect.left(),y),egui::pos2(row.rect.right(),y)],egui::Stroke::new(2.0,Color32::from_rgb(70,150,255)));
+                                if let Some(from) = row.dnd_hover_payload::<PageDrag>()
+                                    .and_then(|payload| drag_index(&payload)).filter(|from| *from != index)
+                                {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                    let y = if from < index { row.rect.bottom() } else { row.rect.top() };
+                                    ui.painter().line_segment([egui::pos2(row.rect.left(),y),egui::pos2(row.rect.right(),y)],egui::Stroke::new(2.0,Color32::from_rgb(70,150,255)));
+                                }
+                                if let Some(from) = row.dnd_release_payload::<PageDrag>().and_then(|payload| drag_index(&payload)) {
+                                    movement = Some((from, index));
+                                }
+                            }
+                            if egui::DragAndDrop::has_payload_of_type::<PageDrag>(ctx) {
+                                let clip = ui.clip_rect();
+                                if let Some(pointer) = ctx.pointer_hover_pos().filter(|pos| clip.contains(*pos)) {
+                                    let edge = 26.0;
+                                    let up = (clip.top() + edge - pointer.y).max(0.0);
+                                    let down = (pointer.y - clip.bottom() + edge).max(0.0);
+                                    let delta = (up - down) * 14.0 * ctx.input(|i| i.stable_dt.min(1.0 / 30.0));
+                                    if delta != 0.0 {
+                                        ui.scroll_with_delta_animation(egui::vec2(0.0, delta), egui::style::ScrollAnimation::none());
+                                        ctx.request_repaint();
                                     }
                                 }
-                                if let Some(payload)=row.dnd_release_payload::<PageDrag>() {movement=Some((payload.0,index));}
-                                if visible!=self.settings.visible_pages[page] {self.set_page_visible(page,visible);}
                             }
                             if let Some(tab)=jump {self.settings_tab=tab;}
-                            if let Some((page,to))=movement {
-                                let from=self.settings.page_order.iter().position(|p|*p==page).unwrap();
-                                if from<to {self.settings.page_order[from..=to].rotate_left(1);}
-                                else {self.settings.page_order[to..=from].rotate_right(1);}
+                            if let Some((from, to)) = movement.filter(|(from, to)| from != to) {
+                                if from < to { order[from..=to].rotate_left(1); }
+                                else { order[to..=from].rotate_right(1); }
+                                self.settings.plugin_page_order.clear();
+                                let mut slot = 0;
+                                for page in order {
+                                    match page {
+                                        OrderedPage::Builtin(page) => {
+                                            self.settings.page_order[slot] = page;
+                                            slot += 1;
+                                        }
+                                        OrderedPage::Plugin(id) => self.settings.plugin_page_order.push((id.to_owned(), slot)),
+                                    }
+                                }
+                                ctx.request_repaint();
+                                ctx.request_repaint_of(egui::ViewportId::ROOT);
                             }
                             if self.settings.visible_pages.iter().filter(|enabled|**enabled).count()==1 {
                                 ui.add_space(5.0);
                                 ui.label(egui::RichText::new("至少保留一个页面。").size(11.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             }
                         });
-                        #[cfg(feature="sdk-js")]
-                        if let Some(route)=self.plugins.status_page_settings(ui) {self.apply_settings_navigation(route);}
                     }
                     0=>{
                         settings_label(ui,"设置页外观");
@@ -2443,7 +2552,31 @@ impl App {
                             ui.add_enabled_ui(master,|ui|{
                                 setting_row(ui,"微信","根据任务栏闪动提醒，不读取联系人或聊天正文",&mut self.settings.wechat_notifications);
                                 if self.settings.wechat_notifications {
-                                    sub(ui,"托盘一键唤起","微信缩在托盘时，点提醒直接唤起微信",&mut self.settings.wechat_tray_open);
+                                    use crate::model::{WechatWakeMethod,WechatWakeShortcut};
+                                    ui.horizontal(|ui|{ui.add_space(22.0);ui.vertical(|ui|{
+                                        setting_row(ui,"托盘一键唤起","微信缩在托盘时，点提醒直接唤起微信",&mut self.settings.wechat_tray_open);
+                                        if !self.settings.wechat_tray_open {return;}
+                                        settings_control_row_right(ui,"托盘唤起方式",|ui|{
+                                            settings_segmented(ui,&mut self.settings.wechat_wake_method,&[
+                                                (WechatWakeMethod::Tray,"系统托盘"),
+                                                (WechatWakeMethod::Shortcut,"快捷键优先"),
+                                            ],72.0);
+                                        });
+                                        settings_hint(ui,match self.settings.wechat_wake_method {
+                                            WechatWakeMethod::Tray=>"适合微信缩进托盘或同时使用多个账号。Windows 可能会展开隐藏图标。",
+                                            WechatWakeMethod::Shortcut=>"适合微信单开且缩进托盘。点击提醒时模拟一次按键，未能唤起时改用系统托盘。",
+                                        });
+                                        if self.settings.wechat_wake_method==WechatWakeMethod::Shortcut {
+                                            settings_control_row(ui,"组合键",SETTINGS_LABEL_W,|ui|{
+                                                ui.add(egui::TextEdit::singleline(&mut self.settings.wechat_wake_shortcut)
+                                                    .desired_width(160.0).char_limit(48).hint_text("例如 Ctrl+Alt+W"))
+                                            });
+                                            settings_hint(ui,"填入微信「设置 → 快捷键」里的「显示/隐藏窗口」组合键。微信改键后，请在这里同步更新。");
+                                            if !self.settings.wechat_wake_shortcut.trim().is_empty() && WechatWakeShortcut::parse(&self.settings.wechat_wake_shortcut).is_none() {
+                                                ui.add(egui::Label::new(egui::RichText::new("当前使用系统托盘。组合键需用 Ctrl、Alt 或 Shift 搭配字母、数字或 F1–F12。").size(11.5).color(Color32::from_rgb(230,150,40))).wrap());
+                                            }
+                                        }
+                                    });});
                                 }
                                 if master && !self.messenger_status(crate::app::Messenger::Wechat).is_empty(){settings_hint(ui,&self.messenger_status(crate::app::Messenger::Wechat));}
                                 ui.separator();
@@ -2645,6 +2778,7 @@ impl App {
                             }
                                                     if !self.mail.note.is_empty(){ui.add_space(3.0);ui.add(egui::Label::new(egui::RichText::new(&self.mail.note).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75)))).wrap());}
                         });
+                        });
                         // 浏览器登录在后台线程等待回调，这里每帧取一次结果。
                         if let Some(rx)=self.mail.form.signin.take(){
                             match rx.try_recv(){
@@ -2658,6 +2792,8 @@ impl App {
                                 Err(std::sync::mpsc::TryRecvError::Disconnected)=>self.mail.note="浏览器登录线程意外结束，请重试".into(),
                             }
                         }
+                        #[cfg(feature="sdk-js")]
+                        self.plugins.settings(ui,"mail",on);
                         // 添加邮箱：一次性的长表单放进弹窗，页面上只保留账号列表。
                         let form_id=egui::Id::new("settings-mail-add");
                         if add_mail {self.mail.form.open=true;self.mail.note.clear();}
@@ -2762,7 +2898,6 @@ impl App {
                                 self.mail.form.use_windows_proxy = false;
                             }
                             }
-                        });
                         }
                     8=>{
                         ui.spacing_mut().item_spacing.y=4.0;

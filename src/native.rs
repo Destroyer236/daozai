@@ -116,6 +116,7 @@ impl DragCapture {
 struct PointerWake {
     canvas: Option<RECT>,
     pill_edge: Option<RECT>,
+    outside_hover_cursor: Option<(i32,i32)>,
 }
 
 impl PointerWake {
@@ -135,7 +136,7 @@ fn collapsed_pill_edge(hit:eframe::egui::Rect,ppp:f32,dock:crate::model::Dock)->
     Some(RECT{left:px(hit.left()),top:px(top),right:px(hit.right()),bottom:px(bottom)})
 }
 
-/// 每 80 ms 检查一次拖放感应区，以及收不到鼠标消息的极简细条和胶囊空隙。
+/// 每 80 ms 检查拖放和收不到鼠标消息的悬停位置。
 fn watch_drag(hwnd:HWND,ctx:eframe::egui::Context,wake:Arc<Mutex<PointerWake>>){
     let raw=hwnd.0 as isize;
     let mut was_down=false;
@@ -153,7 +154,11 @@ fn watch_drag(hwnd:HWND,ctx:eframe::egui::Context,wake:Arc<Mutex<PointerWake>>){
             let passive=GetWindowLongPtrW(hwnd,GWL_EXSTYLE) & WS_EX_TRANSPARENT.0 as isize != 0;
             let wake=*wake.lock().unwrap_or_else(|e|e.into_inner());
             let mut cursor=POINT::default();
-            if (down || passive || wake.pill_edge.is_some()) && GetCursorPos(&mut cursor).is_err(){continue;}
+            if (down || passive || wake.pill_edge.is_some() || wake.outside_hover_cursor.is_some())
+                && GetCursorPos(&mut cursor).is_err(){continue;}
+            if wake.outside_hover_cursor.is_some_and(|last| last != (cursor.x,cursor.y)) {
+                ctx.request_repaint_of(eframe::egui::ViewportId::ROOT);
+            }
             let over_pill_edge=!down && wake.pill_edge_contains(cursor);
             if over_pill_edge && !was_over_pill_edge {ctx.request_repaint_of(eframe::egui::ViewportId::ROOT);}
             was_over_pill_edge=over_pill_edge;
@@ -779,10 +784,11 @@ impl Window {
         Some(r)
     }
 
-    pub fn watch_collapsed_pill_edge(&mut self,hit:Option<eframe::egui::Rect>,ppp:f32,dock:crate::model::Dock) {
-        // 空隙仅唤醒悬停，原生裁剪区域仍按可见轮廓处理点击。
-        self.crop.drag_wake.lock().unwrap_or_else(|e|e.into_inner()).pill_edge=
-            hit.and_then(|hit|collapsed_pill_edge(hit,ppp,dock));
+    pub fn watch_outside_hover(&mut self, pill_hit: Option<eframe::egui::Rect>, cursor: Option<(i32,i32)>, ppp: f32, dock: crate::model::Dock) {
+        // 只唤醒悬停检查，原生点击区域仍按可见轮廓处理。
+        let mut wake = self.crop.drag_wake.lock().unwrap_or_else(|e|e.into_inner());
+        wake.pill_edge = pill_hit.and_then(|hit|collapsed_pill_edge(hit,ppp,dock));
+        wake.outside_hover_cursor = cursor;
     }
 
     pub fn request_crop(&mut self, bounds:Option<eframe::egui::Rect>, transitioning:bool) {
@@ -1191,7 +1197,7 @@ mod tests {
                     Rect::from_min_max(pos2(200.0,164.0),pos2(400.0,194.0)),px(200.0)-1,px(200.0)),
             ] {
                 // 裁紧后的 HWND 可以挪到胶囊边框内，唤醒坐标仍使用原画布起点。
-                let wake=PointerWake{canvas:Some(canvas),pill_edge:collapsed_pill_edge(hit,ppp,dock)};
+                let wake=PointerWake{canvas:Some(canvas),pill_edge:collapsed_pill_edge(hit,ppp,dock),..Default::default()};
                 let point=POINT{x:canvas.left+px(300.0),y:canvas.top+edge};
                 assert!(wake.pill_edge_contains(point),"{dock:?} / {ppp}：屏幕边缘应唤醒");
                 assert!(!wake.pill_edge_contains(POINT{x:canvas.left+px(199.0),..point}));

@@ -45,20 +45,12 @@ pub(super) fn official_index_url() -> Result<Url> {
     ))?)
 }
 
-fn allows_market_material(index: Option<&Url>, preview_build: bool, entry: &Entry) -> bool {
+fn allows_market_material(index: Option<&Url>, preview_build: bool) -> bool {
+    let channel = if preview_build { "preview" } else { "stable" };
     index.is_none_or(|index| {
-        if !is_https_host(index, "gitee.com") || index.query() != Some("ref=master") {
-            return false;
-        }
-        if preview_build {
-            return index.path() == official_index_path("preview");
-        }
-        // 正式集市只接受验收过的液态玻璃包。下载后仍须校验实际文件的大小与哈希。
-        index.path() == official_index_path("stable")
-            && entry.id == "cayww.liquid-glass"
-            && entry.version == "1.0.2"
-            && entry.size == 180301
-            && entry.sha256 == "01619b45b3ba6cf0a71c8d952c8a2aada5fad25379ced21e481784d561d197d8"
+        is_https_host(index, "gitee.com")
+            && index.query() == Some("ref=master")
+            && index.path() == official_index_path(channel)
     })
 }
 
@@ -207,8 +199,8 @@ impl Catalog {
         self.official_index.is_some()
     }
 
-    pub(super) fn allows_material(&self, entry: &Entry) -> bool {
-        allows_market_material(self.official_index.as_ref(), IS_PREVIEW_BUILD, entry)
+    pub(super) fn allows_material(&self) -> bool {
+        allows_market_material(self.official_index.as_ref(), IS_PREVIEW_BUILD)
     }
 
     fn parse(path: PathBuf, official_index: Option<Url>, bytes: &[u8]) -> Result<Self> {
@@ -259,7 +251,7 @@ impl Catalog {
         if raw.len() as u64 != entry.size || sha256(&raw) != entry.sha256 {
             return Err(fail("插件包大小或 SHA-256 与集市目录不一致"));
         }
-        let package = decode_zip(&raw, self.allows_material(entry))?;
+        let package = decode_zip(&raw, self.allows_material())?;
         if !entry.matches(&package.manifest) {
             return Err(fail("插件清单与集市目录不一致"));
         }
@@ -566,11 +558,11 @@ fn read_catalog_zip(path: &Path) -> Result<Vec<u8>> {
 
 fn supported(manifest: &Manifest, allow_material: bool) -> Result<()> {
     let material = manifest.is_material() && allow_material;
-    if (manifest.runtime != "js" && !manifest.is_page_shortcuts() && !manifest.is_wireless()
+    if (manifest.runtime != "js" && !manifest.is_page_shortcuts() && !manifest.is_wireless() && !manifest.is_mail_view()
         && manifest.appearance_kind().is_none() && !material)
         || manifest.entry.contains('/')
     {
-        return Err(fail("集市支持入口在包根目录的脚本插件、外观资源包、快捷切换插件和无线设备兼容包"));
+        return Err(fail("集市支持入口在包根目录的脚本插件、外观资源包、快捷切换插件、邮箱视图和无线设备兼容包"));
     }
     Ok(())
 }

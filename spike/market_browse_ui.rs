@@ -826,7 +826,7 @@ impl LocalPlugins {
         entry: &market::Entry,
     ) -> bool {
         let has_cover = self.market_cover(ui, catalog, entry, egui::CornerRadius::same(9));
-        let is_material = if !catalog.allows_material(entry)
+        let is_material = if !catalog.allows_material()
             || entry.owner().is_some_and(|owner| owner != "appearance")
         {
             Some(false)

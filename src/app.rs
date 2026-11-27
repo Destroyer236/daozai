@@ -19,6 +19,8 @@ use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(feature="sdk-js")]
+use std::time::Duration;
 
 // ---------- 几何（逻辑点；原版 125% 截图 ÷ 1.25） ----------
 pub const PW: f32 = 419.0; // 展开面板宽
@@ -467,6 +469,8 @@ pub struct FrameOut {
     pub hit: Rect,
     /// 切到较矮页面时，原页边缘临时保留的续滚范围，不参与绘制或点击命中。
     pub page_scroll_area: Option<Rect>,
+    /// 光标停在原触发区的岛外部分时，由原生监视线程检测移动。
+    pub watch_outside_hover: bool,
     /// 极简细条只感应悬停，鼠标点击交给下面的应用。
     pub click_through: bool,
     pub notice_hit: Option<Rect>,
@@ -786,13 +790,39 @@ const CENTER_SWEEP: f64 = 0.55;
 /// 已居中的提示色（绿）：岛体描边、外发光和扫光统一用它，颜色本身就是「对准了」。
 const CENTER_TINT: (f32, f32, f32) = (88.0, 222.0, 140.0);
 
+#[cfg(feature="sdk-js")]
+#[derive(Default)]
+pub(crate) struct PinnedFrame {
+    repaint_after: Option<Duration>,
+    animating: bool,
+}
+
+#[cfg(feature="sdk-js")]
+impl PinnedFrame {
+    pub(crate) fn include(&mut self, repaint_after: Option<Duration>, animating: bool) {
+        let repaint_after = if animating {
+            repaint_after.map(|delay| delay.max(Duration::from_nanos(33_333_334)))
+        } else {
+            repaint_after
+        };
+        self.repaint_after = self.repaint_after.into_iter().chain(repaint_after).min();
+        self.animating |= animating;
+    }
+}
+
 pub struct App {
+    #[cfg(windows)]
+    pub(crate) wireless_enhancement: crate::bt::halo_component::Component,
     #[cfg(feature="sdk-js")]
     pub(crate) plugins: crate::sdk_spike::local::LocalPlugins,
     #[cfg(feature="sdk-js")]
     plugin_form_focused: bool,
     #[cfg(feature="sdk-js")]
     pub(crate) pinned_displays: Vec<crate::sdk_spike::local::PinnedDisplay>,
+    #[cfg(feature="sdk-js")]
+    pub(crate) pinned_frame: PinnedFrame,
+    #[cfg(feature="sdk-js")]
+    pinned_was_animating: bool,
     #[cfg(feature="sdk-js")]
     pinned_horizontal_width: f32,
     pub opts: Options,
@@ -824,6 +854,8 @@ pub struct App {
     pub(crate) hold_slot: f32,
     hover_since: Option<f64>,
     leave_since: Option<f64>,
+    /// 本次展开前的悬停范围，以画布中心为原点。
+    hover_open_area: Option<Rect>,
     /// 前台切换导致的强制收起：光标离开前不再自动展开。
     pub hover_lock: bool,
     pub(crate) reveal: f32,
@@ -1048,18 +1080,30 @@ impl App {
         let (bw, bh) = if settings.minimal { (BAR_W_MIN, BAR_H_MIN) } else { (BAR_W, BAR_H) };
         let focus_seconds=settings.focus_minutes as f32*60.0;
         let initial_lyrics=settings.lyrics_enabled;
-        let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
+        #[cfg(feature="sdk-js")]
+        let plugins = crate::sdk_spike::local::LocalPlugins::open(model::config_dir().join("local-plugins"));
+        #[cfg(feature="sdk-js")]
+        let status_pages: Vec<_> = plugins.status_pages().map(|(id, name)| (id.to_owned(), name.to_owned())).collect();
+        #[cfg(not(feature="sdk-js"))]
+        let status_pages = [];
+        let initial_page = Self::visible_navigation_pages(&settings, &status_pages).next().unwrap_or(MUSIC_PAGE);
         let weather_source=crate::weather_source_ui::State::load();
         let mut weather=crate::weather::State::load(&settings.weather_city,settings.weather_position.as_ref());
         if weather_source.displayed==crate::weather_source_ui::Provider::Qweather {weather.snapshot=weather_source.runtime.snapshot();}
         let twofa=crate::twofa::Vault::load();
         Self {
+            #[cfg(windows)]
+            wireless_enhancement: crate::bt::halo_component::Component::load(model::config_dir().join("wireless-battery")),
             #[cfg(feature="sdk-js")]
-            plugins: crate::sdk_spike::local::LocalPlugins::open(model::config_dir().join("local-plugins")),
+            plugins,
             #[cfg(feature="sdk-js")]
             plugin_form_focused: false,
             #[cfg(feature="sdk-js")]
             pinned_displays: Vec::new(),
+            #[cfg(feature="sdk-js")]
+            pinned_frame: PinnedFrame::default(),
+            #[cfg(feature="sdk-js")]
+            pinned_was_animating: false,
             #[cfg(feature="sdk-js")]
             pinned_horizontal_width: WIN_W,
             opts,
@@ -1082,6 +1126,7 @@ impl App {
             open: false,
             hover_since: None,
             leave_since: None,
+            hover_open_area: None,
             hover_lock: false,
             hold_open: false,
             hold_slot: 0.0,
@@ -1099,7 +1144,7 @@ impl App {
             page: initial_page,
             page_from: initial_page,
             #[cfg(feature="sdk-js")]
-            status_pages: Vec::new(),
+            status_pages,
             #[cfg(feature="sdk-js")]
             plugin_canvas_frame: None,
             page_from_offset: 0.0,
@@ -1208,10 +1253,11 @@ impl App {
     #[cfg(windows)]
     pub fn wireless_compat_store(&self) -> crate::bt::compat::Store {
         #[cfg(feature = "sdk-js")]
-        return self.plugins.wireless_store();
+        let store = self.plugins.wireless_store();
 
         #[cfg(not(feature = "sdk-js"))]
-        crate::bt::compat::Store::default()
+        let store = crate::bt::compat::Store::default();
+        store.with_component(self.wireless_enhancement.clone())
     }
 
     #[cfg(all(windows, feature = "sdk-js", feature = "sdk-material"))]
@@ -1895,6 +1941,7 @@ impl App {
         if !visible && self.settings.visible_pages.iter().filter(|enabled|**enabled).count()==1
             && self.settings.visible_pages[page] { return; }
         self.settings.visible_pages[page]=visible;
+        if visible {self.settings.hidden_settings_pages[page]=false;}
         #[cfg(feature="sdk-js")]
         if !visible {
             match page {
@@ -1926,8 +1973,14 @@ impl App {
             self.clear_module_reminders(page);
         }
         if !self.module_on(self.page) {
-            if let Some(first)=self.settings.page_order.iter().copied().find(|page|self.settings.visible_pages[*page]) { self.go(first,1.0); }
+            let first = self.navigation_pages().next();
+            if let Some(first) = first { self.go(first, 1.0); }
         }
+    }
+
+    pub(crate) fn set_page_settings_hidden(&mut self,page:usize,hidden:bool) {
+        if hidden && self.module_on(page) {self.set_page_visible(page,false);}
+        self.settings.hidden_settings_pages[page]=hidden && !self.module_on(page);
     }
 
     fn status_page_count(&self) -> usize {
@@ -1938,9 +1991,24 @@ impl App {
     }
 
     fn navigation_pages(&self) -> impl Iterator<Item=usize> + '_ {
-        self.settings.page_order.iter().copied()
-            .filter(|page|self.settings.visible_pages[*page])
-            .chain(PAGE_NAMES.len()..PAGE_NAMES.len()+self.status_page_count())
+        #[cfg(feature="sdk-js")]
+        let status_pages = self.status_pages.as_slice();
+        #[cfg(not(feature="sdk-js"))]
+        let status_pages = &[];
+        Self::visible_navigation_pages(&self.settings, status_pages)
+    }
+
+    fn visible_navigation_pages<'a>(
+        settings: &'a model::Settings,
+        status_pages: &'a [(String, String)],
+    ) -> impl Iterator<Item=usize> + 'a {
+        use model::OrderedPage;
+        model::ordered_pages(&settings.page_order, &settings.plugin_page_order, status_pages.iter().map(|(id, _)| id.as_str()))
+            .filter_map(move |page| match page {
+                OrderedPage::Builtin(page) => settings.visible_pages[page].then_some(page),
+                OrderedPage::Plugin(id) => status_pages.iter().position(|(source, _)| source == id)
+                    .map(|index| PAGE_NAMES.len() + index),
+            })
     }
 
     fn navigation_page_name(&self, page: usize) -> &str {
@@ -2339,6 +2407,7 @@ impl App {
             self.hover_lock=true;
             self.hover_since=None;
             self.leave_since=None;
+            self.hover_open_area=None;
             self.forced_open_until=0.0;
         }
         self.browser_minimal_active=browser_minimal;
@@ -2409,7 +2478,7 @@ impl App {
             let suppress = self.effective_minimal() || self.notice.is_some() || self.hud_alpha > 0.003
                 || plugin_notice_detail || self.island_lyrics_active() || env.fullscreen_hidden || env.screen_locked;
             let (mut displays, repaint) = self.plugins.pinned_displays(self.open || suppress);
-            if let Some(delay) = repaint { ctx.request_repaint_after(delay); }
+            self.pinned_frame = PinnedFrame { repaint_after: repaint, animating: false };
             for display in &mut displays { display.measure_width(ui); }
             let previous_pinned_width = self.pinned_horizontal_width;
             self.pinned_horizontal_width = WIN_W;
@@ -2487,6 +2556,13 @@ impl App {
         let page_before=self.page;
         let previous_menu=self.shelf_menu_rect.take();
         let inside = env.cursor.is_some_and(|c| hit.contains(c) || previous_menu.is_some_and(|r|r.contains(c)));
+        let can_keep_hover = !env.fullscreen_hidden && !env.screen_locked && self.position_drag.is_none();
+        if !can_keep_hover || !self.open && !self.hover_lock {
+            self.hover_open_area = None;
+        }
+        let cursor_from_center = env.cursor.map(|c| c - win.center().to_vec2());
+        let opening_area_hovered = self.hover_open_area.zip(cursor_from_center)
+            .is_some_and(|(area, cursor)| area.contains(cursor));
         self.page_scroll_area=self.page_scroll_area.filter(|area|self.open && !self.hover_lock
             && !env.fullscreen_hidden && !env.screen_locked && env.cursor.is_some_and(|c|area.contains(c))
             && !ctx.input(|i|i.pointer.any_pressed() || i.key_pressed(egui::Key::Escape)));
@@ -2499,7 +2575,7 @@ impl App {
             }
             r.contains(c)
         }) || self.notice_details_rect(notice).is_some_and(|r|r.contains(c)));
-        if !inside {
+        if !inside && !opening_area_hovered {
             self.hover_lock = false;
         }
         if env.cursor != self.last_cursor || ctx.input(|i| !i.events.is_empty()) {
@@ -2593,8 +2669,18 @@ impl App {
             }
         } else {self.wheel_delta=0.0;}
         let volume_dragging=self.music_volume_open && ctx.is_being_dragged(egui::Id::new(("card-drag",true,"m-volume-track")));
-        let want = plugin_notice_detail || self.hold_open || (page_hover && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || volume_dragging || (self.is_editing() && self.open);
+        if opening_area_hovered && !page_hover && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.hover_lock = true;
+        }
+        let hover_wants_open = (page_hover || self.open && opening_area_hovered) && !self.hover_lock
+            && (self.compact_notices() || self.notice.is_none() || self.open);
+        let want = plugin_notice_detail || self.hold_open || hover_wants_open || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || volume_dragging || (self.is_editing() && self.open);
+        let was_open = self.open;
         self.morph(want, inside, env.t, dt);
+        // 长条收窄后仍认原来的悬停位置，实际点击和滚轮继续按展开面板命中。
+        if can_keep_hover && !was_open && self.open && hover_wants_open && !self.drag_hot {
+            self.hover_open_area = Some(hit.translate(-win.center().to_vec2()));
+        }
         let staying_open = self.open && want;
         if !self.drag_departing || staying_open {
             self.drag_a = anim::approach(self.drag_a, if self.drag_hot { 1.0 } else { 0.0 }, 16.0, dt);
@@ -2938,10 +3024,19 @@ impl App {
         );
         #[cfg(not(feature="sdk-js"))]
         let (canvas_animating, canvas_scroll, canvas_repaint) = (false,None,None);
-        let animating=transitioning || ambient || canvas_animating || twofa_ticking || pet_visible && self.pet.state!=PetState::Sleeping;
+        #[cfg(feature="sdk-js")]
+        let (pinned_repaint, pinned_animating, pinned_animation_ended) = {
+            let active = self.pinned_frame.animating;
+            let ended = std::mem::replace(&mut self.pinned_was_animating, active) && !active;
+            (self.pinned_frame.repaint_after, active, ended)
+        };
+        #[cfg(not(feature="sdk-js"))]
+        let (pinned_repaint, pinned_animating, pinned_animation_ended) = (None,false,false);
+        let animating=transitioning || ambient || canvas_animating || twofa_ticking || pinned_animating || pet_visible && self.pet.state!=PetState::Sleeping;
         // 交互形变保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。
         let repaint_after=std::time::Duration::from_secs_f64(if twofa_ticking{1.0/60.0}else if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0})
-            .min(canvas_repaint.unwrap_or(std::time::Duration::MAX));
+            .min(canvas_repaint.unwrap_or(std::time::Duration::MAX))
+            .min(pinned_repaint.unwrap_or(std::time::Duration::MAX));
         cmds.append(&mut self.pending);
         let next_hit=if side {self.side_hit_rect(win,self.progress(),self.page_height.pos).translate(offset)} else {orient(self.hit_rect(cx,top,self.progress()))};
         #[cfg(feature="sdk-js")]
@@ -2981,6 +3076,7 @@ impl App {
             resident_clip,
             hit: rel(next_hit),
             page_scroll_area:self.page_scroll_area.or(canvas_scroll).map(rel),
+            watch_outside_hover:opening_area_hovered && !inside,
             click_through: minimal_strip && !self.open && self.position_drag.is_none(),
             notice_hit:notice_shape.into_iter().chain(notice_details).chain(messenger_rect).chain(self.shelf_menu_rect).reduce(|a,b|a.union(b)).map(rel),
             top_bar_notice:top_bar_notice.into_iter().chain(notice_details.map(|r|r.intersect(ui.max_rect()))).filter(|r|r.is_positive()).reduce(|a,b|a.union(b)).map(rel),
@@ -2990,7 +3086,8 @@ impl App {
             animating,
             page_transition,
             water_view_transition,
-            interactive_transition:interactive_transition || canvas_animating,
+            // 常驻动画按环境帧交付，结束时交付一次完整的最终画面。
+            interactive_transition:interactive_transition || canvas_animating || pinned_animation_ended,
             repaint_after,
             cmds,
         }
@@ -3900,7 +3997,10 @@ impl App {
                 let mut clicked = None;
                 for (slot, display) in layout.pinned_slots().zip(&self.pinned_displays) {
                     if let Some(x) = layout.x[slot] {
-                        if display.draw(&c, local_cx + x, 15.0, layout.widths[slot], false, theme) {
+                        let (click, repaint_after, animating) =
+                            display.draw(&c, local_cx + x, 15.0, layout.widths[slot], false, theme);
+                        self.pinned_frame.include(repaint_after, animating);
+                        if click {
                             clicked = Some(display.plugin.clone());
                         }
                     }
@@ -4097,33 +4197,35 @@ impl App {
     fn nav(&mut self, c: &Card) {
         let all_pages:Vec<_>=self.navigation_pages().collect();
         if all_pages.len()<2 { return; }
-        // 停靠方式决定箭头的锚点，切页改变面板高度时仍可原地点击。
-        let anchor_y=68.0;
-        let arrow_y=match self.dock() {
-            model::Dock::Top=>anchor_y,
-            model::Dock::Bottom=>c.to_local(c.painter.clip_rect().center_bottom()).y-(PH-anchor_y),
-            model::Dock::Left|model::Dock::Right=>anchor_y+(self.page_height.pos-PH)/2.0,
-        };
-        for (x, direction, id) in [(21.0,-1.0,"nav-l"),(398.0,1.0,"nav-r")] {
-            let arrow_card=if self.side() {c.edge_control(x-13.0,arrow_y-13.0,26.0,26.0)} else {Some(c.clone())};
-            let Some(arrow_card)=arrow_card else {continue};
-            let button=arrow_card.hit(x-13.0,arrow_y-13.0,26.0,26.0,id);
-            let (hover,press)=arrow_card.hover_t(&button);
-            #[cfg(all(windows, feature = "sdk-material"))]
-            if !self.glassy() || self.glass_controls_ready() {
-                let role=if direction>0.0 {crate::material::ControlRole::NavR} else {crate::material::ControlRole::NavL};
-                let radius=if self.glassy() {12.0} else {9.0*(1.0-0.08*press)};
-                arrow_card.material_circle_with_role(&button,x,arrow_y,radius,role);
-            }
-            if self.glassy() {
-                paint::chevron_glass(&arrow_card,x,arrow_y,direction,hover,self.glass_control_scale(&button,press),self.glass_controls_ready());
-            } else {
-                paint::chevron(&arrow_card,x,arrow_y,direction,hover,press);
-            }
-            if button.clicked() {self.navigate_page(direction>0.0);}
-        }
         let shortcuts = self.page_shortcuts_enabled();
-        // 页数较多时，底栏随当前页移动，左右箭头和滚轮仍可切到每一页。
+        if !shortcuts || !self.settings.hide_page_arrows {
+            // 停靠方式决定箭头的锚点，切页改变面板高度时仍可原地点击。
+            let anchor_y=68.0;
+            let arrow_y=match self.dock() {
+                model::Dock::Top=>anchor_y,
+                model::Dock::Bottom=>c.to_local(c.painter.clip_rect().center_bottom()).y-(PH-anchor_y),
+                model::Dock::Left|model::Dock::Right=>anchor_y+(self.page_height.pos-PH)/2.0,
+            };
+            for (x, direction, id) in [(21.0,-1.0,"nav-l"),(398.0,1.0,"nav-r")] {
+                let arrow_card=if self.side() {c.edge_control(x-13.0,arrow_y-13.0,26.0,26.0)} else {Some(c.clone())};
+                let Some(arrow_card)=arrow_card else {continue};
+                let button=arrow_card.hit(x-13.0,arrow_y-13.0,26.0,26.0,id);
+                let (hover,press)=arrow_card.hover_t(&button);
+                #[cfg(all(windows, feature = "sdk-material"))]
+                if !self.glassy() || self.glass_controls_ready() {
+                    let role=if direction>0.0 {crate::material::ControlRole::NavR} else {crate::material::ControlRole::NavL};
+                    let radius=if self.glassy() {12.0} else {9.0*(1.0-0.08*press)};
+                    arrow_card.material_circle_with_role(&button,x,arrow_y,radius,role);
+                }
+                if self.glassy() {
+                    paint::chevron_glass(&arrow_card,x,arrow_y,direction,hover,self.glass_control_scale(&button,press),self.glass_controls_ready());
+                } else {
+                    paint::chevron(&arrow_card,x,arrow_y,direction,hover,press);
+                }
+                if button.clicked() {self.navigate_page(direction>0.0);}
+            }
+        }
+        // 页数较多时，底栏随当前页移动，滚轮仍可切到每一页。
         let max_slots=if shortcuts {PAGE_NAMES.len()}else{40};
         let current=all_pages.iter().position(|&page|page==self.page).unwrap_or_default();
         let start=current.saturating_sub(max_slots/2).min(all_pages.len().saturating_sub(max_slots));

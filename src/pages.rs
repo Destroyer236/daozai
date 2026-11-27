@@ -1234,28 +1234,74 @@ impl App {
         }
         use crate::mail_manage::{Action,Folder};
         let folder=self.mail.manage.folder();let trash=folder==Folder::Trash;
+        #[cfg(feature = "sdk-js")]
+        let extension = self.plugins.active_mail_view().map(|(id, layout)| (id.to_owned(), layout));
+        #[cfg(not(feature = "sdk-js"))]
+        let extension: Option<(String, crate::mail_manage_ui::MailView)> = None;
+        let mut selected = None;
+        if let Some((id, layout)) = &extension {
+            let accounts: Vec<_> = self.mail.accounts.iter().filter(|a| a.enabled).collect();
+            let current = self.mail.manage.view_account.as_ref().filter(|(owner, _)| owner == id)
+                .and_then(|(_, email)| accounts.iter().position(|a| a.email.eq_ignore_ascii_case(email)))
+                .map_or(0, |index| index + 1);
+            let mut index = current;
+            let y = 123.0;
+            for (x, label, delta, hint) in [(176.0, "‹", accounts.len(), "上一个邮箱"), (339.0, "›", 1, "下一个邮箱")] {
+                c.text(x + 8.0, y + 12.0, label, 12.0, W::Bold, theme::BLUE, H::Center);
+                if c.hit(x, y, 16.0, 16.0, ("mail-view-account-step", x as i32))
+                    .on_hover_text(hint).clicked()
+                {
+                    index = (current + delta) % (accounts.len() + 1);
+                }
+            }
+            let address = index.checked_sub(1).map(|i| accounts[i].email.clone());
+            let label = address.as_deref().map(|email| layout.aliases.get(&email.to_ascii_lowercase())
+                .map_or(email, String::as_str)).unwrap_or("全部邮箱");
+            c.text(267.0, y + 12.0, &c.fit(label, 9.0, W::Regular, 144.0), 9.0, W::Regular, theme::WHITE, H::Center);
+            let tooltip = format!("{}（{}/{}）{}", address.as_deref().unwrap_or("全部邮箱"),
+                index + 1, accounts.len() + 1, layout.start_date.map_or(String::new(), |date| format!(" · {} 起", date)));
+            c.hit(193.0, y, 145.0, 16.0, "mail-view-account-current").on_hover_text(tooltip);
+            self.mail.manage.view_account = address.as_ref().map(|email| (id.clone(), email.clone()));
+            selected = address;
+        } else {
+            self.mail.manage.view_account = None;
+        }
+        let start = extension.as_ref().and_then(|(_, layout)| layout.start_date);
+        let in_scope = |item: &mail::Item| selected.as_ref().is_none_or(|email| item.account.eq_ignore_ascii_case(email))
+            && start.is_none_or(|date| item.received_unix
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .is_some_and(|received| received.with_timezone(&chrono::Local).date_naive() >= date));
+        let show_unread = extension.as_ref().is_none_or(|(_, layout)| layout.show_unread);
         let list_bounds=self.mail_list_bounds();let list_x=list_bounds.left();let row_w=list_bounds.width()-12.0;
         let compact=code.is_none()&&link.is_none();let row_h=if compact{21.5}else{34.0};
-        let all_count=self.mail.recent.len();
-        let unread=self.mail.recent.iter().filter(|m|self.mail_seen(m,Folder::Inbox)==Some(false)).count();
+        let all_count=self.mail.recent.iter().filter(|m| in_scope(m)).count();
+        let unread=self.mail.recent.iter().filter(|m|in_scope(m)&&self.mail_seen(m,Folder::Inbox)==Some(false)).count();
         if trash{
-            c.text(list_x+6.0,47.0,&format!("{} {}",if self.settings.mail_sync_operations{"回收站"}else{"本机回收站"},self.mail.manage.trash.len()),10.5,W::Semibold,theme::WHITE,H::Left);
+            c.text(list_x+6.0,47.0,&format!("{} {}",if self.settings.mail_sync_operations{"回收站"}else{"本机回收站"},self.mail.manage.trash.iter().filter(|m| in_scope(m)).count()),10.5,W::Semibold,theme::WHITE,H::Left);
             c.text(375.0,47.0,"返回邮件",10.0,W::Regular,theme::BLUE,H::Right);
             if c.hit(322.0,33.0,56.0,19.0,"mail-trash-back").clicked(){self.mail_toggle_trash();return;}
         }else{
             for (x,width,label,selected,id) in [
                 (list_x,52.0,format!("全部 {all_count}"),!self.mail.manage.unread_only,"mail-all"),
-                (list_x+56.0,52.0,format!("未读 {unread}"),self.mail.manage.unread_only,"mail-unread"),
+                (list_x+56.0,52.0,if show_unread {format!("未读 {unread}")}else{"未读".into()},self.mail.manage.unread_only,"mail-unread"),
             ]{
                 if selected{c.fill(x,33.0,width,19.0,6.0,theme::BTN);}
                 c.text(x+width/2.0,47.0,&label,10.0,W::Semibold,if selected{theme::WHITE}else{theme::GRAY},H::Center);
                 if c.hit(x,33.0,width,19.0,id).on_hover_text("当前加载的最近邮件").clicked(){self.mail.manage.unread_only=id=="mail-unread";}
             }
             c.text(307.0,46.0,if self.settings.mail_sync_operations{"同步"}else{"仅本机"},8.0,W::Regular,theme::DIM,H::Center);
-            let ready=self.mail.manage.pending.is_empty()&&self.mail.accounts.iter().any(|a|a.enabled&&self.mail.manage.data.contains_key(&(crate::mail::key(a),Folder::Inbox))&&self.mail.manage.identities.get(&crate::mail::key(a))==Some(a));
+            let scope_ready = extension.is_none() || (selected.is_some() && start.is_none());
+            let ready=scope_ready&&self.mail.accounts.iter().any(|a|a.enabled
+                && selected.as_ref().is_none_or(|email| a.email.eq_ignore_ascii_case(email))
+                && self.mail_ready(&a.email,Folder::Inbox));
             c.text(375.0,47.0,"全部已读",10.0,W::Regular,if ready{theme::BLUE}else{theme::DIM},H::Right);
-            if c.hit(325.0,33.0,53.0,19.0,"mail-read-all").on_hover_text(if self.settings.mail_sync_operations{"将已连接邮箱的未读邮件全部标为已读"}else{"仅将岛仔当前加载的邮件标为已读，不更改邮箱"}).clicked()&&ready{
-                self.mail_manage_request(None,Folder::Inbox,Action::ReadAll);
+            let hint = if extension.is_some() && start.is_some() {"有日期筛选时不支持批量标记，请逐封操作"}
+                else if extension.is_some() && selected.is_none() {"请先选择具体邮箱"}
+                else if extension.is_some() && self.settings.mail_sync_operations {"将当前邮箱的未读邮件全部标为已读，并同步到邮箱"}
+                else if self.settings.mail_sync_operations {"将已连接邮箱的未读邮件全部标为已读"}
+                else {"仅将当前范围内岛仔已加载的邮件标为已读，不更改邮箱"};
+            if c.hit(325.0,33.0,53.0,19.0,"mail-read-all").on_hover_text(hint).clicked()&&ready{
+                self.mail_manage_request(selected.as_deref(),Folder::Inbox,Action::ReadAll);
             }
         }
         if !trash{
@@ -1267,7 +1313,7 @@ impl App {
             c.text(42.0,134.0,&c.fit(&self.mail.manage.message,8.0,W::Regular,125.0),8.0,W::Regular,theme::GRAY,H::Left);
             if c.hit(40.0,123.0,130.0,16.0,"mail-manage-status").on_hover_text(format!("{}\n点击刷新邮件状态",self.mail.manage.message)).clicked(){self.mail_manage_request(None,folder,Action::Load);}
         }
-        let indices:Vec<_>=self.mail_rows().iter().enumerate().filter(|(_,m)|trash||!self.mail.manage.unread_only||self.mail_seen(m,folder)==Some(false)).map(|(i,_)|i).collect();
+        let indices:Vec<_>=self.mail_rows().iter().enumerate().filter(|(_,m)|in_scope(m)&&(trash||!self.mail.manage.unread_only||self.mail_seen(m,folder)==Some(false))).map(|(i,_)|i).collect();
         if indices.is_empty(){
             let message=if !self.mail.manage.pending.is_empty(){"正在同步邮件…"}else if trash{"回收站为空"}else if self.mail.manage.unread_only{"没有未读邮件"}else{"还没有收到邮件"};
             c.text(list_x+6.0,80.0,message,11.0,W::Regular,theme::GRAY,H::Left);return;
@@ -1278,7 +1324,7 @@ impl App {
         content.set_opacity(c.painter.opacity());if !c.live{content.disable();}
         content.spacing_mut().item_spacing.y=0.0;content.spacing_mut().scroll.floating=false;content.spacing_mut().scroll.bar_width=4.0*c.s;
         content.visuals_mut().widgets.inactive.bg_fill=Color32::from_gray(80);
-        let scroll=egui::ScrollArea::vertical().id_salt(("mail-list-scroll",trash,self.mail.manage.unread_only)).max_height(list_bounds.height()*c.s).auto_shrink([false,false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show_rows(&mut content,row_h*c.s,indices.len(),|ui,range|{
+        let scroll=egui::ScrollArea::vertical().id_salt(("mail-list-scroll",trash,self.mail.manage.unread_only,selected.as_deref(),start)).max_height(list_bounds.height()*c.s).auto_shrink([false,false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show_rows(&mut content,row_h*c.s,indices.len(),|ui,range|{
             let rows:Vec<_>=range.map(|i|self.mail_rows()[indices[i]].clone()).collect();
             for raw in rows{
                 let item=self.display_mail(&raw);let hidden=self.mail_code_hidden(&raw);let seen=self.mail_seen(&raw,folder);

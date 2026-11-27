@@ -124,6 +124,7 @@ optional = true
 [features]
 default = ["fragile-send-sync-non-atomic-wasm"]
 direct-composition = ["winit", "wgpu/dx12", "dep:pollster", "dep:windows"]
+surface-test = ["winit", "wgpu/dx12", "wgpu/counters", "dep:pollster"]
 fragile-send-sync-non-atomic-wasm = ["wgpu/fragile-send-sync-non-atomic-wasm"]
 wayland = ["winit?/wayland"]
 winit = [
